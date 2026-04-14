@@ -1336,13 +1336,17 @@ class VpnService:
         # scenarios or future use).
         _e("FIREWALL_VPN_INPUT_PORTS", "5555")
 
-        # Use DNS-over-HTTPS (port 443) instead of the default
-        # DNS-over-TLS (port 853).  Some VPN providers (e.g. TunnelBear)
-        # block outgoing port 853 which breaks Gluetun's health-check
-        # and triggers a VPN restart loop that, combined with the missing
-        # xt_mark kernel module on many VPS hosts, permanently kills
-        # network connectivity.  DoH on port 443 is universally allowed.
-        _e("DNS_UPSTREAM_RESOLVER_TYPE", "doh")
+        # Use plain (UDP) DNS instead of the default DNS-over-TLS.
+        # DoT (port 853) is blocked by some VPN providers (e.g.
+        # TunnelBear).  DoH (port 443) works but creates TCP
+        # connections that trigger iptables mark-based rules.  Many VPS
+        # kernels (Hetzner, etc.) lack the xt_mark module, so those
+        # mark rules malfunction and eventually block ALL outgoing
+        # traffic, killing the VPN after ~15 seconds.  Plain UDP DNS
+        # avoids TCP entirely and thus no mark rules are created.
+        # The DNS traffic is still encrypted at the VPN tunnel level.
+        _e("DNS_UPSTREAM_RESOLVER_TYPE", "plain")
+        _e("DNS_UPSTREAM_PLAIN_ADDRESSES", "1.1.1.1:53,8.8.8.8:53")
 
         return env_flags
 
