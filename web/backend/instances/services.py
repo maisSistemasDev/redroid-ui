@@ -1269,7 +1269,22 @@ class VpnService:
         if "persist-key" not in existing:
             extras.append("persist-key")
 
-        # --- Step 4: add host routes for VPN server IPs ---
+        # --- Step 4: force redirect-gateway def1 ---
+        # def1 adds 0.0.0.0/1 + 128.0.0.0/1 instead of deleting the
+        # default route.  This is far more resilient when Docker adds
+        # interfaces/routes via "docker network connect".
+        rg_lines: list[str] = []
+        for ln in ovpn_content.splitlines():
+            s = ln.strip()
+            if s.startswith("redirect-gateway"):
+                rg_lines.append(s)
+        for old_rg in rg_lines:
+            if "def1" not in old_rg:
+                new_rg = old_rg + " def1"
+                ovpn_content = ovpn_content.replace(old_rg, new_rg)
+                logger.info("VPN _sanitize_ovpn: forced def1: %s -> %s", old_rg, new_rg)
+
+        # --- Step 5: add host routes for VPN server IPs ---
         # When OpenVPN uses redirect-gateway, all traffic goes via tun0.
         # On reconnection the VPN server becomes unreachable.  Adding an
         # explicit route via ``net_gateway`` (OpenVPN macro for the
@@ -1422,13 +1437,29 @@ class VpnService:
         # Start on default bridge (has internet gateway).  The redroid-ui
         # network is internal and has no internet access — OpenVPN would
         # fail to reach the VPN server.
-        cmd += [
-            VPN_IMAGE,
-            "openvpn",
-            "--cd", vpn_path,
-            "--config", "custom.conf",
-            "--verb", "3",
-        ]
+        #
+        # We use a wrapper script that:
+        # 1) Saves the original default gateway before OpenVPN modifies it.
+        # 2) Starts OpenVPN in the background.
+        # 3) Runs a background route monitor that re-adds server routes
+        #    every 5 seconds (survives docker network connect disruptions).
+        # 4) Waits on the OpenVPN PID so the container stays alive.
+        wrapper = (
+            "GW=$(ip route | awk '/^default/{print $3}'); "
+            "SIPS=$(grep -E '^remote ' " + vpn_path + "/custom.conf"
+            " | awk '{print $2}'); "
+            "openvpn --cd " + vpn_path + " --config custom.conf --verb 3 & "
+            "PID=$!; "
+            "( while kill -0 $PID 2>/dev/null; do "
+            "    for s in $SIPS; do "
+            "      ip route replace $s/32 via $GW dev eth0 2>/dev/null || true; "
+            "    done; "
+            "    sleep 5; "
+            "  done "
+            ") & "
+            "wait $PID"
+        )
+        cmd += [VPN_IMAGE, "sh", "-c", wrapper]
 
         # Log (mask auth file content)
         logger.info("start_sidecar: docker run command: %s", " ".join(cmd))
@@ -1489,12 +1520,6 @@ class VpnService:
                 return True
             time.sleep(2)
         return False
-
-    @staticmethod
-    def stop_sidecar(name: str) -> None:
-        dc = _docker_cmd()
-        sidecar = VpnService._sidecar_name(name)
-        _run(dc + ["stop", sidecar], timeout=30)
 
     @staticmethod
     def remove_sidecar(name: str) -> None:
