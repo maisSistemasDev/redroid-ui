@@ -1336,15 +1336,13 @@ class VpnService:
         # scenarios or future use).
         _e("FIREWALL_VPN_INPUT_PORTS", "5555")
 
-        # Disable Gluetun's built-in DNS-over-TLS proxy and its DNS
-        # server entirely.  Many VPN hosts lack the xt_mark kernel module
-        # which breaks iptables; when a health-check fails Gluetun
-        # restarts the VPN, the firewall cleanup fails, and the network
-        # becomes permanently unreachable.  With DOT=off and
-        # DNS_KEEP_NAMESERVER=on the container uses the DNS servers
-        # pushed by the VPN provider (e.g. dhcp-option in .ovpn).
-        _e("DOT", "off")
-        _e("DNS_KEEP_NAMESERVER", "on")
+        # Use DNS-over-HTTPS (port 443) instead of the default
+        # DNS-over-TLS (port 853).  Some VPN providers (e.g. TunnelBear)
+        # block outgoing port 853 which breaks Gluetun's health-check
+        # and triggers a VPN restart loop that, combined with the missing
+        # xt_mark kernel module on many VPS hosts, permanently kills
+        # network connectivity.  DoH on port 443 is universally allowed.
+        _e("DNS_UPSTREAM_RESOLVER_TYPE", "doh")
 
         return env_flags
 
