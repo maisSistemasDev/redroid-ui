@@ -1336,11 +1336,15 @@ class VpnService:
         # scenarios or future use).
         _e("FIREWALL_VPN_INPUT_PORTS", "5555")
 
-        # Disable Gluetun's built-in DNS-over-TLS proxy.  Some VPN
-        # providers (e.g. TunnelBear) block port 853 which breaks DoT.
-        # With DOT=off DNS queries go through the VPN tunnel normally
-        # using the servers from the .ovpn dhcp-option directives.
+        # Disable Gluetun's built-in DNS-over-TLS proxy and its DNS
+        # server entirely.  Many VPN hosts lack the xt_mark kernel module
+        # which breaks iptables; when a health-check fails Gluetun
+        # restarts the VPN, the firewall cleanup fails, and the network
+        # becomes permanently unreachable.  With DOT=off and
+        # DNS_KEEP_NAMESERVER=on the container uses the DNS servers
+        # pushed by the VPN provider (e.g. dhcp-option in .ovpn).
         _e("DOT", "off")
+        _e("DNS_KEEP_NAMESERVER", "on")
 
         return env_flags
 
@@ -1380,23 +1384,11 @@ class VpnService:
         if is_custom_wireguard and not (vpn_dir / "wg0.conf").exists():
             raise RuntimeError("Arquivo de configuração WireGuard (wg0.conf) não encontrado.")
 
-        # If config was modified, force-recreate the sidecar so Gluetun
-        # picks up the new file (it caches config at startup).
-        if config_changed:
-            logger.info("start_sidecar: config changed, forcing recreate of %s", sidecar)
-            _run(dc + ["rm", "-f", sidecar], timeout=30)
-        else:
-            # Try to start existing container first.
-            p = _run(dc + ["start", sidecar])
-            if p.returncode == 0:
-                try:
-                    VpnService._wait_running(name)
-                    return
-                except RuntimeError:
-                    logger.warning("start_sidecar: existing %s crashed, recreating", sidecar)
-                    _run(dc + ["rm", "-f", sidecar], timeout=30)
-
-        # Remove leftover stopped container.
+        # Always recreate the sidecar to ensure current env vars (DOT,
+        # FIREWALL_*, etc.) are applied.  Docker containers bake env
+        # vars at creation time, so `docker start` on a stale container
+        # would use outdated settings.
+        logger.info("start_sidecar: removing old sidecar %s (if any) to ensure fresh env", sidecar)
         _run(dc + ["rm", "-f", sidecar], timeout=30)
 
         # --- Volume mount ---
