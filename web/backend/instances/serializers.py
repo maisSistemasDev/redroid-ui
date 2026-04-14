@@ -23,6 +23,7 @@ class CreateInstanceSerializer(serializers.Serializer):
     vpn_type = serializers.ChoiceField(choices=["openvpn", "wireguard"], required=False, default="openvpn")
     vpn_provider = serializers.CharField(required=False, default="custom", allow_blank=True, max_length=64)
     vpn_config = serializers.CharField(required=False, default="", allow_blank=True)
+    vpn_ca_cert = serializers.CharField(required=False, default="", allow_blank=True)
     vpn_username = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
     vpn_password = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
 
@@ -32,5 +33,6 @@ class UpdateVpnSerializer(serializers.Serializer):
     vpn_type = serializers.ChoiceField(choices=["openvpn", "wireguard"], required=False, default="openvpn")
     vpn_provider = serializers.CharField(required=False, default="custom", allow_blank=True, max_length=64)
     vpn_config = serializers.CharField(required=False, default="", allow_blank=True)
+    vpn_ca_cert = serializers.CharField(required=False, default="", allow_blank=True)
     vpn_username = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
     vpn_password = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)

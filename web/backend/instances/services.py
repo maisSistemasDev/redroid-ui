@@ -1241,12 +1241,22 @@ class VpnService:
         return ovpn_content
 
     @staticmethod
-    def store_config(name: str, ovpn_content: str, username: str = "", password: str = "") -> Path:
+    def store_config(
+        name: str,
+        ovpn_content: str,
+        username: str = "",
+        password: str = "",
+        ca_cert: str = "",
+    ) -> Path:
         """Store a custom .ovpn config for the given instance."""
         vpn_dir = VpnService._vpn_dir(name)
         vpn_dir.mkdir(parents=True, exist_ok=True)
 
         ovpn_content = VpnService._sanitize_ovpn(ovpn_content)
+
+        # If a CA certificate was provided separately, inject it inline.
+        if ca_cert.strip():
+            ovpn_content += f"\n<ca>\n{ca_cert.strip()}\n</ca>\n"
 
         config_path = vpn_dir / "custom.conf"
         config_path.write_text(ovpn_content, encoding="utf-8")

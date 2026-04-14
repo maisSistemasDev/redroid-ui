@@ -87,6 +87,7 @@ class InstanceViewSet(viewsets.ModelViewSet):
             "vpn_type": d.get("vpn_type", "openvpn"),
             "vpn_provider": d.get("vpn_provider", "custom"),
             "vpn_config": d.get("vpn_config", ""),
+            "vpn_ca_cert": d.get("vpn_ca_cert", ""),
             "vpn_username": d.get("vpn_username", ""),
             "vpn_password": d.get("vpn_password", ""),
         }
@@ -251,11 +252,12 @@ class InstanceViewSet(viewsets.ModelViewSet):
         vpn_type = d.get("vpn_type", "openvpn")
         vpn_provider = d.get("vpn_provider", "custom")
         vpn_config = d.get("vpn_config", "")
+        vpn_ca_cert = d.get("vpn_ca_cert", "")
         vpn_username = d.get("vpn_username", "")
         vpn_password = d.get("vpn_password", "")
 
         if vpn_enabled and vpn_config.strip():
-            VpnService.store_config(instance.name, vpn_config, vpn_username, vpn_password)
+            VpnService.store_config(instance.name, vpn_config, vpn_username, vpn_password, ca_cert=vpn_ca_cert)
 
         instance.vpn_enabled = vpn_enabled
         instance.vpn_type = vpn_type

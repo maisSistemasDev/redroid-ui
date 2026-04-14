@@ -62,6 +62,7 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
         vpn_type = payload.get("vpn_type", "openvpn")
         vpn_provider = payload.get("vpn_provider", "custom")
         vpn_config = payload.get("vpn_config", "")
+        vpn_ca_cert = payload.get("vpn_ca_cert", "")
         vpn_username = payload.get("vpn_username", "")
         vpn_password = payload.get("vpn_password", "")
 
@@ -70,7 +71,7 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
             if vpn_provider == "custom" and vpn_type == "openvpn" and not vpn_config.strip():
                 raise RuntimeError("Conteúdo do arquivo .ovpn é obrigatório quando VPN custom/OpenVPN está ativa.")
             if vpn_config.strip():
-                VpnService.store_config(name, vpn_config, vpn_username, vpn_password)
+                VpnService.store_config(name, vpn_config, vpn_username, vpn_password, ca_cert=vpn_ca_cert)
             VpnService.start_sidecar(name, vpn_type=vpn_type, provider=vpn_provider, username=vpn_username, password=vpn_password)
             if not VpnService.wait_tunnel(name, timeout=30):
                 logger.warning("create_instance_task: VPN tunnel not ready for %s, continuing anyway", name)

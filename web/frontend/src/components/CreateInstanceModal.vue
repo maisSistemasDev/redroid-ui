@@ -16,6 +16,7 @@ const vpnType = ref('openvpn')
 const vpnProvider = ref('custom')
 const vpnFile = ref(null)
 const vpnConfig = ref('')
+const vpnCaCert = ref('')
 const vpnUsername = ref('')
 const vpnPassword = ref('')
 const error = ref('')
@@ -69,6 +70,7 @@ async function handleSubmit() {
       payload.vpn_type = vpnType.value
       payload.vpn_provider = vpnProvider.value
       if (vpnConfig.value) payload.vpn_config = vpnConfig.value
+      if (vpnCaCert.value) payload.vpn_ca_cert = vpnCaCert.value
       if (vpnUsername.value) payload.vpn_username = vpnUsername.value
       if (vpnPassword.value) payload.vpn_password = vpnPassword.value
     }
@@ -98,6 +100,14 @@ function handleVpnFile(event) {
   if (!file) return
   const reader = new FileReader()
   reader.onload = (e) => { vpnConfig.value = e.target.result }
+  reader.readAsText(file)
+}
+
+function handleCaCertFile(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = (e) => { vpnCaCert.value = e.target.result }
   reader.readAsText(file)
 }
 
@@ -168,6 +178,13 @@ onMounted(() => {
             <label class="label" for="inst-vpn-file">Arquivo de configuração (.ovpn / .conf)</label>
             <input id="inst-vpn-file" ref="vpnFile" type="file" accept=".ovpn,.conf" class="input" @change="handleVpnFile" />
             <small v-if="vpnConfig" class="hint">Arquivo carregado ({{ vpnConfig.length }} bytes)</small>
+          </div>
+
+          <div v-if="vpnProvider === 'custom' && vpnType === 'openvpn'" class="form-group">
+            <label class="label" for="inst-vpn-ca">Certificado CA (.crt / .pem) — opcional</label>
+            <input id="inst-vpn-ca" type="file" accept=".crt,.pem,.cer" class="input" @change="handleCaCertFile" />
+            <small class="hint">Necessário se o .ovpn referencia um arquivo CA externo (ex: TunnelBear)</small>
+            <small v-if="vpnCaCert" class="hint">CA carregado ({{ vpnCaCert.length }} bytes)</small>
           </div>
 
           <div class="form-group">
