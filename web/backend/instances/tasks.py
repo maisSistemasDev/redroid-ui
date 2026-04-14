@@ -60,6 +60,7 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
         extra_props = payload.get("extra_props", "")
         vpn_enabled = bool(payload.get("vpn_enabled", False))
         vpn_config = payload.get("vpn_config", "")
+        vpn_ca_cert = payload.get("vpn_ca_cert", "")
         vpn_username = payload.get("vpn_username", "")
         vpn_password = payload.get("vpn_password", "")
 
@@ -67,7 +68,7 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
         if vpn_enabled:
             if not vpn_config.strip():
                 raise RuntimeError("Conteúdo do arquivo .ovpn é obrigatório quando VPN está ativa.")
-            VpnService.store_config(name, vpn_config, vpn_username, vpn_password)
+            VpnService.store_config(name, vpn_config, vpn_username, vpn_password, ca_cert=vpn_ca_cert)
             VpnService.start_sidecar(name)
             if not VpnService.wait_tunnel(name, timeout=30):
                 logger.warning("create_instance_task: VPN tunnel not ready for %s, continuing anyway", name)

@@ -14,6 +14,7 @@ const availableImages = ref([])
 const vpnEnabled = ref(false)
 const vpnFile = ref(null)
 const vpnConfig = ref('')
+const vpnCaCert = ref('')
 const vpnUsername = ref('')
 const vpnPassword = ref('')
 const error = ref('')
@@ -50,6 +51,7 @@ async function handleSubmit() {
     if (vpnEnabled.value && vpnConfig.value) {
       payload.vpn_enabled = true
       payload.vpn_config = vpnConfig.value
+      if (vpnCaCert.value) payload.vpn_ca_cert = vpnCaCert.value
       if (vpnUsername.value) payload.vpn_username = vpnUsername.value
       if (vpnPassword.value) payload.vpn_password = vpnPassword.value
     }
@@ -79,6 +81,14 @@ function handleVpnFile(event) {
   if (!file) return
   const reader = new FileReader()
   reader.onload = (e) => { vpnConfig.value = e.target.result }
+  reader.readAsText(file)
+}
+
+function handleCaCertFile(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = (e) => { vpnCaCert.value = e.target.result }
   reader.readAsText(file)
 }
 
@@ -134,6 +144,11 @@ onMounted(() => {
             <label class="label" for="inst-vpn-file">Arquivo .ovpn</label>
             <input id="inst-vpn-file" ref="vpnFile" type="file" accept=".ovpn,.conf" class="input" @change="handleVpnFile" />
             <small v-if="vpnConfig" class="hint">Arquivo carregado ({{ vpnConfig.length }} bytes)</small>
+          </div>
+          <div class="form-group">
+            <label class="label" for="inst-vpn-ca">Certificado CA (opcional)</label>
+            <input id="inst-vpn-ca" type="file" accept=".crt,.pem,.cer" class="input" @change="handleCaCertFile" />
+            <small class="hint">Necessário se o .ovpn referencia um arquivo CA externo (ex: TunnelBear)</small>
           </div>
           <div class="form-group">
             <label class="label" for="inst-vpn-user">Usuário VPN (opcional)</label>

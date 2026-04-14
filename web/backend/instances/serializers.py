@@ -21,6 +21,7 @@ class CreateInstanceSerializer(serializers.Serializer):
     extra_props = serializers.CharField(required=False, default="", allow_blank=True)
     vpn_enabled = serializers.BooleanField(required=False, default=False)
     vpn_config = serializers.CharField(required=False, default="", allow_blank=True)
+    vpn_ca_cert = serializers.CharField(required=False, default="", allow_blank=True)
     vpn_username = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
     vpn_password = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
 
@@ -28,5 +29,6 @@ class CreateInstanceSerializer(serializers.Serializer):
 class UpdateVpnSerializer(serializers.Serializer):
     vpn_enabled = serializers.BooleanField(required=False, default=True)
     vpn_config = serializers.CharField(required=False, default="", allow_blank=True)
+    vpn_ca_cert = serializers.CharField(required=False, default="", allow_blank=True)
     vpn_username = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
     vpn_password = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)

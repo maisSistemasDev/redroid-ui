@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -534,7 +535,7 @@ done
         check = _run(["adb", "-s", serial, "shell", "test -x /touch_inject && echo OK"], timeout=5)
         if "OK" in (check.stdout or ""):
             return
-        container_name = serial.split(":")[0]
+        container_name = _serial_container_name(serial)
         dc = _docker_cmd()
         _run(dc + ["cp", str(binary), f"{container_name}:/touch_inject"])
         _run(dc + ["exec", container_name, "chmod", "+x", "/touch_inject"])
@@ -688,11 +689,20 @@ def cmd_send_direct(serial: str, cmd: str, timeout: int = 12) -> bool:
 
 
 def _serial_container_name(serial: str) -> str:
+    """Extract the redroid container name from an ADB serial.
+
+    When VPN is active the serial looks like ``{name}-vpn:5555`` but the
+    Android container is simply ``{name}``.  Strip the ``-vpn`` suffix so
+    that ``docker exec`` targets the correct container.
+    """
     host = serial.split(":", 1)[0].strip()
     if not host:
         return ""
     if not re.match(r"^[a-zA-Z0-9_.-]+$", host):
         return ""
+    # VPN sidecar names end with '-vpn'; the redroid container is without.
+    if host.endswith("-vpn"):
+        host = host[:-4]
     return host
 
 
@@ -1186,6 +1196,54 @@ class VpnService:
         return f"{name}-vpn"
 
     @staticmethod
+    def _sanitize_ovpn(ovpn_content: str) -> str:
+        """Sanitize a custom .ovpn config.
+
+        1. Resolve hostnames in ``remote`` directives to IPs.
+        2. Remove file-path directives (ca, cert, key, tls-auth, tls-crypt)
+           that reference external files — they won't exist inside the
+           sidecar container.
+        """
+        # --- Step 1: resolve hostnames in 'remote' lines ---
+        resolved_lines: list[str] = []
+        for ln in ovpn_content.splitlines():
+            stripped = ln.strip()
+            if stripped.startswith("remote "):
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    host = parts[1]
+                    try:
+                        socket.inet_aton(host)
+                    except OSError:
+                        try:
+                            ip = socket.gethostbyname(host)
+                            logger.info("VPN _sanitize_ovpn: resolved %s -> %s", host, ip)
+                            parts[1] = ip
+                            ln = " ".join(parts)
+                        except socket.gaierror:
+                            logger.warning("VPN _sanitize_ovpn: could not resolve %s, keeping hostname", host)
+            resolved_lines.append(ln)
+        ovpn_content = "\n".join(resolved_lines) + "\n"
+
+        # --- Step 2: remove external file-path directives ---
+        file_directives = {"ca", "cert", "key", "tls-auth", "tls-crypt"}
+        cleaned: list[str] = []
+        for ln in ovpn_content.splitlines():
+            s = ln.strip()
+            skip = False
+            if not s.startswith("<"):
+                for directive in file_directives:
+                    if s == directive or s.startswith(directive + " "):
+                        logger.info("VPN _sanitize_ovpn: removing file-path directive: %s", s)
+                        skip = True
+                        break
+            if not skip:
+                cleaned.append(ln)
+        ovpn_content = "\n".join(cleaned) + "\n"
+
+        return ovpn_content
+
+    @staticmethod
     def ensure_image() -> None:
         dc = _docker_cmd()
         p = _run(dc + ["image", "inspect", VPN_IMAGE])
@@ -1206,9 +1264,16 @@ class VpnService:
             )
 
     @staticmethod
-    def store_config(name: str, ovpn_content: str, username: str = "", password: str = "") -> Path:
+    def store_config(name: str, ovpn_content: str, username: str = "", password: str = "", ca_cert: str = "") -> Path:
         vpn_dir = VpnService._vpn_dir(name)
         vpn_dir.mkdir(parents=True, exist_ok=True)
+
+        ovpn_content = VpnService._sanitize_ovpn(ovpn_content)
+
+        # If a CA certificate was provided separately, inject it inline.
+        if ca_cert.strip():
+            ovpn_content += f"\n<ca>\n{ca_cert.strip()}\n</ca>\n"
+
         config_path = vpn_dir / "config.ovpn"
         config_path.write_text(ovpn_content, encoding="utf-8")
 
