@@ -1319,7 +1319,10 @@ class VpnService:
             if password:
                 _e("WIREGUARD_ADDRESSES", password)
 
-        # Kill switch — block traffic if tunnel goes down
+        # Allow ADB (5555) from the local Docker network.
+        _e("FIREWALL_INPUT_PORTS", "5555")
+        # Also allow inbound on the VPN interface (for port-forwarded
+        # scenarios or future use).
         _e("FIREWALL_VPN_INPUT_PORTS", "5555")
 
         return env_flags
