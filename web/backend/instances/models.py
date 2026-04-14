@@ -14,6 +14,8 @@ class Instance(models.Model):
     gpu_mode = models.CharField(max_length=16, default="guest")
     extra_props = models.TextField(blank=True, default="")
     vpn_enabled = models.BooleanField(default=False)
+    vpn_type = models.CharField(max_length=16, default="openvpn")
+    vpn_provider = models.CharField(max_length=64, default="custom")
     vpn_username = models.CharField(max_length=128, blank=True, default="")
     vpn_password = models.CharField(max_length=128, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
