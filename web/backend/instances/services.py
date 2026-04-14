@@ -1159,19 +1159,14 @@ def start_build(params: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# VPN (Gluetun sidecar) service
+# VPN (Alpine + OpenVPN sidecar) service
 # ---------------------------------------------------------------------------
 
-GLUETUN_IMAGE = "qmcgaw/gluetun"
-
-# Providers that are natively supported by Gluetun (no custom .ovpn needed).
-GLUETUN_NATIVE_PROVIDERS = {
-    "airvpn", "cyberghost", "expressvpn", "fastestvpn", "giganews",
-    "hidemyass", "ipvanish", "ivpn", "mullvad", "nordvpn",
-    "perfect privacy", "privado", "private internet access", "privatevpn",
-    "protonvpn", "purevpn", "slickvpn", "surfshark", "torguard",
-    "vpnsecure", "vpnunlimited", "vyprvpn", "windscribe",
-}
+VPN_IMAGE = "redroid-ui/openvpn-client"
+VPN_DOCKERFILE = """\
+FROM alpine:3.20
+RUN apk add --no-cache openvpn
+"""
 
 
 class VpnService:
@@ -1220,12 +1215,14 @@ class VpnService:
 
     @staticmethod
     def _sanitize_ovpn(ovpn_content: str) -> str:
-        """Sanitize a custom .ovpn config for Gluetun compatibility.
+        """Sanitize a custom .ovpn config for the Alpine+OpenVPN sidecar.
 
         1. Resolve hostnames in ``remote`` directives to IPs.
         2. Remove file-path directives (ca, cert, key, tls-auth, tls-crypt)
-           that reference external files — they never exist inside the
-           Gluetun container regardless of whether inline blocks are present.
+           that reference external files — they don't exist in the sidecar.
+        3. Add persist-tun/persist-key for stable reconnection.
+        4. Add explicit host routes for VPN server IPs via the original
+           gateway so that reconnection works after redirect-gateway.
         """
         # --- Step 1: resolve hostnames in 'remote' lines ---
         resolved_lines: list[str] = []
@@ -1249,10 +1246,6 @@ class VpnService:
         ovpn_content = "\n".join(resolved_lines) + "\n"
 
         # --- Step 2: remove external file-path directives ---
-        # In the Gluetun container, external files referenced by ca, cert,
-        # key, tls-auth, tls-crypt NEVER exist.  Remove these directives
-        # unconditionally (whether or not inline <ca>...</ca> blocks exist).
-        # Lines like "<ca>" or "</ca>" are kept — only "ca somefile.crt" is removed.
         file_directives = {"ca", "cert", "key", "tls-auth", "tls-crypt"}
         cleaned: list[str] = []
         for ln in ovpn_content.splitlines():
@@ -1267,6 +1260,38 @@ class VpnService:
             if not skip:
                 cleaned.append(ln)
         ovpn_content = "\n".join(cleaned) + "\n"
+
+        # --- Step 3: add persist-tun / persist-key ---
+        existing = ovpn_content.lower()
+        extras: list[str] = []
+        if "persist-tun" not in existing:
+            extras.append("persist-tun")
+        if "persist-key" not in existing:
+            extras.append("persist-key")
+
+        # --- Step 4: add host routes for VPN server IPs ---
+        # When OpenVPN uses redirect-gateway, all traffic goes via tun0.
+        # On reconnection the VPN server becomes unreachable.  Adding an
+        # explicit route via ``net_gateway`` (OpenVPN macro for the
+        # original default gateway) keeps the VPN server reachable.
+        server_ips: list[str] = []
+        for ln in ovpn_content.splitlines():
+            s = ln.strip()
+            if s.startswith("remote "):
+                parts = s.split()
+                if len(parts) >= 2:
+                    try:
+                        socket.inet_aton(parts[1])
+                        server_ips.append(parts[1])
+                    except OSError:
+                        pass
+        for sip in server_ips:
+            route_line = f"route {sip} 255.255.255.255 net_gateway"
+            if route_line not in ovpn_content:
+                extras.append(route_line)
+
+        if extras:
+            ovpn_content += "\n".join(extras) + "\n"
 
         return ovpn_content
 
@@ -1295,14 +1320,14 @@ class VpnService:
             auth_path = vpn_dir / "auth.txt"
             auth_path.write_text(f"{username}\n{password}\n", encoding="utf-8")
             auth_path.chmod(0o600)
-            # Gluetun handles auth via OPENVPN_USER / OPENVPN_PASSWORD env
-            # vars, so we do NOT patch the .ovpn file here.  Remove any
-            # existing auth-user-pass directives to avoid conflicts.
+            # Remove any existing auth-user-pass directives, then add one
+            # pointing to auth.txt (relative path — openvpn uses --cd).
             text = config_path.read_text(encoding="utf-8")
             lines = [
                 ln for ln in text.splitlines()
                 if not ln.strip().startswith("auth-user-pass")
             ]
+            lines.append("auth-user-pass auth.txt")
             config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
         config_path.chmod(0o600)
@@ -1315,64 +1340,25 @@ class VpnService:
             shutil.rmtree(vpn_dir, ignore_errors=True)
 
     @staticmethod
-    def _build_env(
-        vpn_type: str = "openvpn",
-        provider: str = "custom",
-        username: str = "",
-        password: str = "",
-    ) -> list[str]:
-        """Build the ``-e`` environment flags for Gluetun."""
-        env_flags: list[str] = []
-
-        def _e(key: str, val: str) -> None:
-            env_flags.extend(["-e", f"{key}={val}"])
-
-        _e("VPN_SERVICE_PROVIDER", provider)
-        _e("VPN_TYPE", vpn_type)
-
-        if vpn_type == "openvpn":
-            if provider == "custom":
-                _e("OPENVPN_CUSTOM_CONFIG", "/gluetun/custom.conf")
-            if username:
-                _e("OPENVPN_USER", username)
-            if password:
-                _e("OPENVPN_PASSWORD", password)
-        elif vpn_type == "wireguard":
-            # For WireGuard with native providers the credentials are not
-            # openvpn user/pass but rather WireGuard keys.  The user stores
-            # the private key in `vpn_username` and addresses in
-            # `vpn_password` as a pragmatic re-use of existing fields.
-            if provider == "custom":
-                pass  # Config via wg0.conf bind-mounted inside /gluetun/wireguard/
-            if username:
-                _e("WIREGUARD_PRIVATE_KEY", username)
-            if password:
-                _e("WIREGUARD_ADDRESSES", password)
-
-        # Disable Gluetun's built-in iptables firewall (kill switch).
-        # Gluetun's firewall rules use iptables mark matching (-m mark)
-        # which requires the xt_mark kernel module.  Many VPS kernels
-        # (Hetzner, OVH, etc.) lack this module, causing ALL firewall
-        # rules to fail — which paradoxically blocks all traffic and
-        # kills the VPN after a few seconds.  Disabling the firewall
-        # still lets OpenVPN/WireGuard handle routing via their own
-        # redirect-gateway / AllowedIPs mechanisms; we just lose the
-        # kill-switch (acceptable for containerised Android instances).
-        _e("FIREWALL", "off")
-
-        # Use plain (UDP) DNS instead of the default DNS-over-TLS.
-        # DoT (port 853) is blocked by some VPN providers (e.g.
-        # TunnelBear).  DoH (port 443) works but creates TCP
-        # connections that trigger iptables mark-based rules.  Many VPS
-        # kernels (Hetzner, etc.) lack the xt_mark module, so those
-        # mark rules malfunction and eventually block ALL outgoing
-        # traffic, killing the VPN after ~15 seconds.  Plain UDP DNS
-        # avoids TCP entirely and thus no mark rules are created.
-        # The DNS traffic is still encrypted at the VPN tunnel level.
-        _e("DNS_UPSTREAM_RESOLVER_TYPE", "plain")
-        _e("DNS_UPSTREAM_PLAIN_ADDRESSES", "1.1.1.1:53,8.8.8.8:53")
-
-        return env_flags
+    def ensure_image() -> None:
+        """Build the Alpine+OpenVPN image if it doesn't exist."""
+        dc = _docker_cmd()
+        p = _run(dc + ["image", "inspect", VPN_IMAGE])
+        if p.returncode == 0:
+            return
+        logger.info("VpnService: building %s image", VPN_IMAGE)
+        p = subprocess.run(
+            dc + ["build", "-t", VPN_IMAGE, "-"],
+            input=VPN_DOCKERFILE,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if p.returncode != 0:
+            raise RuntimeError(
+                f"Falha ao construir imagem VPN: {(p.stderr or p.stdout or '').strip()}"
+            )
 
     @staticmethod
     def start_sidecar(
@@ -1386,75 +1372,42 @@ class VpnService:
         sidecar = VpnService._sidecar_name(name)
         vpn_dir = VpnService._vpn_dir(name)
 
-        is_custom_openvpn = provider == "custom" and vpn_type == "openvpn"
-        is_custom_wireguard = provider == "custom" and vpn_type == "wireguard"
+        if provider != "custom" or vpn_type != "openvpn":
+            raise RuntimeError(
+                "Atualmente apenas VPN custom OpenVPN é suportada. "
+                "Providers nativos requerem o módulo xt_mark do kernel."
+            )
 
-        # Handle legacy filename (config.ovpn → custom.conf) and re-sanitize.
-        config_changed = False
-        if is_custom_openvpn:
-            legacy = vpn_dir / "config.ovpn"
-            target = vpn_dir / "custom.conf"
-            if legacy.exists() and not target.exists():
-                legacy.rename(target)
-                config_changed = True
-            if target.exists():
-                raw = target.read_text(encoding="utf-8")
-                sanitized = VpnService._sanitize_ovpn(raw)
-                if sanitized != raw:
-                    target.write_text(sanitized, encoding="utf-8")
-                    config_changed = True
-                    logger.info("start_sidecar: re-sanitized config for %s", name)
+        config_file = vpn_dir / "custom.conf"
 
-        if is_custom_openvpn and not (vpn_dir / "custom.conf").exists():
+        # Handle legacy filename.
+        legacy = vpn_dir / "config.ovpn"
+        if legacy.exists() and not config_file.exists():
+            legacy.rename(config_file)
+
+        if not config_file.exists():
             raise RuntimeError("Arquivo de configuração VPN (.ovpn) não encontrado.")
-        if is_custom_wireguard and not (vpn_dir / "wg0.conf").exists():
-            raise RuntimeError("Arquivo de configuração WireGuard (wg0.conf) não encontrado.")
 
-        # Always recreate the sidecar to ensure current env vars (DOT,
-        # FIREWALL_*, etc.) are applied.  Docker containers bake env
-        # vars at creation time, so `docker start` on a stale container
-        # would use outdated settings.
-        logger.info("start_sidecar: removing old sidecar %s (if any) to ensure fresh env", sidecar)
+        # Re-sanitize on every start.
+        raw = config_file.read_text(encoding="utf-8")
+        sanitized = VpnService._sanitize_ovpn(raw)
+        if sanitized != raw:
+            config_file.write_text(sanitized, encoding="utf-8")
+            logger.info("start_sidecar: re-sanitized config for %s", name)
+
+        VpnService.ensure_image()
+
+        logger.info("start_sidecar: removing old sidecar %s (if any)", sidecar)
         _run(dc + ["rm", "-f", sidecar], timeout=30)
 
         # --- Volume mount ---
-        # Gluetun expects custom configs under /gluetun.  We mount the
-        # instance's _vpn/<name> directory there.
         data_volume = VpnService._detect_data_volume()
         if data_volume:
-            vpn_mount = f"{data_volume}:{settings.DATA_ROOT}:ro"
-            gluetun_vol = [
-                "-v", vpn_mount,
-                "-v", f"{settings.DATA_ROOT}/_vpn/{name}:/gluetun:ro",
-            ]
-            # Override: we need the data volume to see the files, and a
-            # second mount that extracts just the vpn dir to /gluetun.
-            # But Docker doesn't allow mounting a subpath of a named
-            # volume directly.  Instead, mount the whole volume and use
-            # OPENVPN_CUSTOM_CONFIG to point to the file inside DATA_ROOT.
-            gluetun_vol = ["-v", vpn_mount]
+            vol_flags = ["-v", f"{data_volume}:{settings.DATA_ROOT}"]
+            vpn_path = f"{settings.DATA_ROOT}/_vpn/{name}"
         else:
-            gluetun_vol = ["-v", f"{vpn_dir}:/gluetun:ro"]
-
-        # For custom OpenVPN, override config path when using named volume
-        env_list = VpnService._build_env(vpn_type, provider, username, password)
-        if is_custom_openvpn and data_volume:
-            # Replace the default /gluetun/custom.conf with the full path
-            env_list = [
-                x if not x.startswith("OPENVPN_CUSTOM_CONFIG=")
-                else f"OPENVPN_CUSTOM_CONFIG={settings.DATA_ROOT}/_vpn/{name}/custom.conf"
-                for x in env_list
-            ]
-
-        # For custom WireGuard, mount the wg0.conf in the right place
-        if is_custom_wireguard:
-            if data_volume:
-                # Gluetun reads /gluetun/wireguard/wg0.conf
-                # We'll need a symlink or env override — simplest: bind the
-                # file.  With named volumes we point via DATA_ROOT.
-                pass  # The volume mount already covers it if we arrange the path
-            else:
-                gluetun_vol += ["-v", f"{vpn_dir}/wg0.conf:/gluetun/wireguard/wg0.conf:ro"]
+            vol_flags = ["-v", f"{vpn_dir}:/vpn"]
+            vpn_path = "/vpn"
 
         cmd = dc + [
             "run", "-d",
@@ -1465,21 +1418,20 @@ class VpnService:
             "--cap-add=NET_ADMIN",
             "--device=/dev/net/tun",
         ]
-        cmd += gluetun_vol
-        cmd += env_list
-        # Do NOT attach to the REDROID_DOCKER_NETWORK at creation time.
-        # That network is typically an internal Docker bridge with no
-        # internet gateway.  Gluetun needs internet access on its default
-        # interface (eth0) to reach the VPN server.  We connect it to
-        # the redroid network AFTER the container is running.
-        cmd += [GLUETUN_IMAGE]
-
-        # Log the full docker run command (mask passwords)
-        safe_cmd = [
-            x if not any(k in x for k in ("PASSWORD=", "USER=")) else x.split("=")[0] + "=***"
-            for x in cmd
+        cmd += vol_flags
+        # Start on default bridge (has internet gateway).  The redroid-ui
+        # network is internal and has no internet access — OpenVPN would
+        # fail to reach the VPN server.
+        cmd += [
+            VPN_IMAGE,
+            "openvpn",
+            "--cd", vpn_path,
+            "--config", "custom.conf",
+            "--verb", "3",
         ]
-        logger.info("start_sidecar: docker run command: %s", " ".join(safe_cmd))
+
+        # Log (mask auth file content)
+        logger.info("start_sidecar: docker run command: %s", " ".join(cmd))
 
         p = _run(cmd, timeout=120)
         if p.returncode != 0:
@@ -1489,19 +1441,8 @@ class VpnService:
 
         VpnService._wait_running(name)
 
-        # Neutralize broken iptables mark rules.  Gluetun creates OUTPUT
-        # chain rules with ``-m mark`` for DNS leak prevention even when
-        # FIREWALL=off.  On VPS kernels lacking the ``xt_mark`` module
-        # these rules malfunction and end up blocking ALL traffic, which
-        # kills the VPN ~6 seconds after it connects.  We start a
-        # background loop that flushes the filter OUTPUT chain every 2 s
-        # so the broken rules never accumulate.  With FIREWALL=off the
-        # only filter rules are these mark rules, so flushing is safe
-        # (NAT/Docker DNS rules live in the nat table, unaffected).
-        VpnService._start_iptables_cleaner(name)
-
-        # Now attach the sidecar to the internal redroid network so that
-        # the backend (and other services) can reach it by container name.
+        # Attach to the internal redroid network so the backend can reach
+        # the sidecar by container name (for ADB, streaming, etc.).
         network = getattr(settings, "REDROID_DOCKER_NETWORK", "")
         if network:
             p = _run(dc + ["network", "connect", network, sidecar], timeout=30)
@@ -1512,39 +1453,6 @@ class VpnService:
                 )
             else:
                 logger.info("start_sidecar: connected %s to %s", sidecar, network)
-
-    @staticmethod
-    def _start_iptables_cleaner(name: str) -> None:
-        """Launch a background loop inside the sidecar that flushes broken
-        iptables mark rules every 2 seconds.
-
-        Gluetun creates ``-m mark … -j DROP`` rules in the filter OUTPUT
-        chain for DNS leak prevention.  On hosts without the ``xt_mark``
-        kernel module these rules corrupt the chain and block all traffic.
-        This detached process keeps the chain clean for the lifetime of
-        the container (dies automatically when the container stops).
-        """
-        dc = _docker_cmd()
-        sidecar = VpnService._sidecar_name(name)
-        # Flush immediately, then loop every 2 s.  Only touches the filter
-        # table OUTPUT chain — NAT rules (Docker DNS) are in a separate table.
-        cleaner_script = (
-            "iptables -F OUTPUT 2>/dev/null; "
-            "iptables -P OUTPUT ACCEPT 2>/dev/null; "
-            "while true; do "
-            "  sleep 2; "
-            "  iptables -F OUTPUT 2>/dev/null; "
-            "  iptables -P OUTPUT ACCEPT 2>/dev/null; "
-            "done"
-        )
-        p = _run(dc + ["exec", "-d", sidecar, "sh", "-c", cleaner_script], timeout=10)
-        if p.returncode != 0:
-            logger.warning(
-                "start_sidecar: failed to start iptables cleaner in %s: %s",
-                sidecar, (p.stderr or p.stdout or "").strip(),
-            )
-        else:
-            logger.info("start_sidecar: iptables cleaner running in %s", sidecar)
 
     @staticmethod
     def _wait_running(name: str, timeout: int = 10) -> None:
@@ -1572,23 +1480,13 @@ class VpnService:
 
     @staticmethod
     def wait_tunnel(name: str, timeout: int = 30) -> bool:
-        """Wait for the VPN tunnel to come up.
-
-        Gluetun exposes a health endpoint on port 9999 inside the
-        container.  We also fall back to checking for tun0/wg0.
-        """
+        """Wait for the VPN tunnel interface (tun0) to come up."""
         dc = _docker_cmd()
         sidecar = VpnService._sidecar_name(name)
         for _ in range(timeout // 2):
-            # Primary: Gluetun HTTP health check
-            p = _run(dc + ["exec", sidecar, "wget", "-qO-", "http://127.0.0.1:9999"], timeout=5)
-            if p.returncode == 0:
+            p = _run(dc + ["exec", sidecar, "ip", "addr", "show", "tun0"], timeout=5)
+            if p.returncode == 0 and "inet " in (p.stdout or ""):
                 return True
-            # Fallback: check for VPN network interface
-            for iface in ("tun0", "wg0"):
-                p2 = _run(dc + ["exec", sidecar, "ip", "addr", "show", iface], timeout=5)
-                if p2.returncode == 0 and "inet " in p2.stdout:
-                    return True
             time.sleep(2)
         return False
 
