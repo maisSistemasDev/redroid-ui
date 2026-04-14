@@ -19,8 +19,33 @@ const vpnConfig = ref('')
 const vpnCaCert = ref('')
 const vpnUsername = ref('')
 const vpnPassword = ref('')
+const vpnCountry = ref('')
 const error = ref('')
 const loading = ref(false)
+
+// Countries with good Tor exit node coverage
+const TOR_COUNTRIES = [
+  { code: '', label: 'Qualquer país (padrão)' },
+  { code: 'US', label: '🇺🇸 Estados Unidos' },
+  { code: 'DE', label: '🇩🇪 Alemanha' },
+  { code: 'NL', label: '🇳🇱 Holanda' },
+  { code: 'FR', label: '🇫🇷 França' },
+  { code: 'GB', label: '🇬🇧 Reino Unido' },
+  { code: 'SE', label: '🇸🇪 Suécia' },
+  { code: 'AT', label: '🇦🇹 Áustria' },
+  { code: 'CH', label: '🇨🇭 Suíça' },
+  { code: 'CA', label: '🇨🇦 Canadá' },
+  { code: 'LU', label: '🇱🇺 Luxemburgo' },
+  { code: 'CZ', label: '🇨🇿 República Tcheca' },
+  { code: 'RO', label: '🇷🇴 Romênia' },
+  { code: 'FI', label: '🇫🇮 Finlândia' },
+  { code: 'ES', label: '🇪🇸 Espanha' },
+  { code: 'AU', label: '🇦🇺 Austrália' },
+  { code: 'JP', label: '🇯🇵 Japão' },
+  { code: 'SG', label: '🇸🇬 Singapura' },
+  { code: 'BR', label: '🇧🇷 Brasil' },
+  { code: 'PL', label: '🇵🇱 Polônia' },
+]
 
 const vpnProviders = [
   { value: 'custom', label: 'Custom (arquivo .ovpn / .conf)' },
@@ -69,10 +94,14 @@ async function handleSubmit() {
       payload.vpn_enabled = true
       payload.vpn_type = vpnType.value
       payload.vpn_provider = vpnProvider.value
-      if (vpnConfig.value) payload.vpn_config = vpnConfig.value
-      if (vpnCaCert.value) payload.vpn_ca_cert = vpnCaCert.value
-      if (vpnUsername.value) payload.vpn_username = vpnUsername.value
-      if (vpnPassword.value) payload.vpn_password = vpnPassword.value
+      if (vpnType.value === 'tor') {
+        if (vpnCountry.value) payload.vpn_country = vpnCountry.value
+      } else {
+        if (vpnConfig.value) payload.vpn_config = vpnConfig.value
+        if (vpnCaCert.value) payload.vpn_ca_cert = vpnCaCert.value
+        if (vpnUsername.value) payload.vpn_username = vpnUsername.value
+        if (vpnPassword.value) payload.vpn_password = vpnPassword.value
+      }
     }
     await store.createInstance(payload)
     emit('close')
@@ -154,7 +183,7 @@ onMounted(() => {
         <div class="form-group">
           <label class="label checkline">
             <input v-model="vpnEnabled" type="checkbox" />
-            Usar VPN (via Gluetun)
+            Usar VPN (OpenVPN / Tor)
           </label>
         </div>
 
@@ -169,33 +198,46 @@ onMounted(() => {
           <div v-if="vpnProvider === 'custom'" class="form-group">
             <label class="label" for="inst-vpn-type">Tipo VPN</label>
             <select id="inst-vpn-type" v-model="vpnType" class="input">
-              <option value="openvpn">OpenVPN</option>
-              <option value="wireguard">WireGuard</option>
+              <option value="openvpn">OpenVPN (arquivo .ovpn)</option>
+              <option value="tor">Tor — Whonix-like (anônimo, sem config)</option>
             </select>
           </div>
 
-          <div v-if="vpnProvider === 'custom'" class="form-group">
-            <label class="label" for="inst-vpn-file">Arquivo de configuração (.ovpn / .conf)</label>
-            <input id="inst-vpn-file" ref="vpnFile" type="file" accept=".ovpn,.conf" class="input" @change="handleVpnFile" />
-            <small v-if="vpnConfig" class="hint">Arquivo carregado ({{ vpnConfig.length }} bytes)</small>
-          </div>
+          <!-- Tor: country selector only -->
+          <template v-if="vpnType === 'tor'">
+            <div class="form-group">
+              <label class="label" for="inst-vpn-country">País de saída (nó de exit Tor)</label>
+              <select id="inst-vpn-country" v-model="vpnCountry" class="input">
+                <option v-for="c in TOR_COUNTRIES" :key="c.code" :value="c.code">{{ c.label }}</option>
+              </select>
+              <small class="hint">A disponibilidade de nós por país pode variar. Sem garantia de IP específico.</small>
+            </div>
+          </template>
 
-          <div v-if="vpnProvider === 'custom' && vpnType === 'openvpn'" class="form-group">
-            <label class="label" for="inst-vpn-ca">Certificado CA (.crt / .pem) — opcional</label>
-            <input id="inst-vpn-ca" type="file" accept=".crt,.pem,.cer" class="input" @change="handleCaCertFile" />
-            <small class="hint">Necessário se o .ovpn referencia um arquivo CA externo (ex: TunnelBear)</small>
-            <small v-if="vpnCaCert" class="hint">CA carregado ({{ vpnCaCert.length }} bytes)</small>
-          </div>
+          <!-- OpenVPN: config file + credentials -->
+          <template v-else-if="vpnProvider === 'custom'">
+            <div class="form-group">
+              <label class="label" for="inst-vpn-file">Arquivo de configuração (.ovpn / .conf)</label>
+              <input id="inst-vpn-file" ref="vpnFile" type="file" accept=".ovpn,.conf" class="input" @change="handleVpnFile" />
+              <small v-if="vpnConfig" class="hint">Arquivo carregado ({{ vpnConfig.length }} bytes)</small>
+            </div>
 
-          <div class="form-group">
-            <label class="label" for="inst-vpn-user">{{ vpnType === 'wireguard' && vpnProvider === 'custom' ? 'Private Key' : 'Usuário VPN' }} (opcional)</label>
-            <input id="inst-vpn-user" v-model="vpnUsername" class="input" :placeholder="vpnType === 'wireguard' && vpnProvider === 'custom' ? 'wOEI9rqqbDwnN8/B...' : 'username'" />
-          </div>
-          <div class="form-group">
-            <label class="label" for="inst-vpn-pass">{{ vpnType === 'wireguard' && vpnProvider === 'custom' ? 'Addresses (ex: 10.64.222.21/32)' : 'Senha VPN' }} (opcional)</label>
-            <input id="inst-vpn-pass" v-model="vpnPassword" class="input" :type="vpnType === 'wireguard' && vpnProvider === 'custom' ? 'text' : 'password'" :placeholder="vpnType === 'wireguard' && vpnProvider === 'custom' ? '10.64.222.21/32' : 'password'" />
-          </div>
-        </template>
+            <div class="form-group">
+              <label class="label" for="inst-vpn-ca">Certificado CA (.crt / .pem) — opcional</label>
+              <input id="inst-vpn-ca" type="file" accept=".crt,.pem,.cer" class="input" @change="handleCaCertFile" />
+              <small class="hint">Necessário se o .ovpn referencia um arquivo CA externo (ex: TunnelBear)</small>
+              <small v-if="vpnCaCert" class="hint">CA carregado ({{ vpnCaCert.length }} bytes)</small>
+            </div>
+
+            <div class="form-group">
+              <label class="label" for="inst-vpn-user">Usuário VPN (opcional)</label>
+              <input id="inst-vpn-user" v-model="vpnUsername" class="input" placeholder="username" />
+            </div>
+            <div class="form-group">
+              <label class="label" for="inst-vpn-pass">Senha VPN (opcional)</label>
+              <input id="inst-vpn-pass" v-model="vpnPassword" class="input" type="password" placeholder="password" />
+            </div>
+          </template>
 
         <div class="form-actions">
           <button type="button" class="btn" @click="emit('close')">Cancelar</button>

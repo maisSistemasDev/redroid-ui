@@ -90,6 +90,7 @@ class InstanceViewSet(viewsets.ModelViewSet):
             "vpn_ca_cert": d.get("vpn_ca_cert", ""),
             "vpn_username": d.get("vpn_username", ""),
             "vpn_password": d.get("vpn_password", ""),
+            "vpn_country": d.get("vpn_country", ""),
         }
         try:
             task = create_instance_task.delay(user.id, payload)
@@ -145,8 +146,9 @@ class InstanceViewSet(viewsets.ModelViewSet):
                     provider=instance.vpn_provider,
                     username=instance.vpn_username,
                     password=instance.vpn_password,
+                    country=getattr(instance, "vpn_country", ""),
                 )
-                VpnService.wait_tunnel(instance.name, timeout=20)
+                VpnService.wait_tunnel(instance.name, timeout=60, vpn_type=instance.vpn_type)
             DockerService.start(instance.name)
             TouchService.setup_virtual_touch(instance.name)
             TouchService.setup_virtual_keyboard(instance.name)

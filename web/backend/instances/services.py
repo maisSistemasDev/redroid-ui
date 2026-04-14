@@ -1177,6 +1177,96 @@ FROM alpine:3.20
 RUN apk add --no-cache openvpn
 """
 
+# ---------------------------------------------------------------------------
+# Tor transparent-proxy sidecar (Whonix-like)
+# ---------------------------------------------------------------------------
+
+TOR_IMAGE = "redroid-ui/tor-client"
+TOR_DOCKERFILE = """\
+FROM alpine:3.20
+RUN apk add --no-cache tor redsocks iptables
+"""
+
+# Startup script embedded in the container command.
+# Architecture:
+#   1. Start tor.  Tor uses eth0 (default bridge) to bootstrap via Tor network.
+#   2. Wait for bootstrap (SOCKS5 port 9050 opens).
+#   3. Start redsocks forwarding TCP → tor SOCKS5.
+#   4. Apply iptables NAT REDIRECT *after* tor has ESTABLISHED relay
+#      connections.  Conntrack skips NAT for ESTABLISHED flows, so tor's
+#      relay traffic is not re-routed.  Only NEW outgoing connections (from
+#      the Android container) hit the REDIRECT rule.
+#   5. DNS: redirect UDP/53 → tor's DNSPort (5353).
+#
+# Country selection: pass TOR_COUNTRY env var (ISO 3166-1 alpha-2).
+# No xt_mark or xt_owner needed — uses only xt_REDIRECT in the NAT table.
+
+TOR_STARTUP_SCRIPT = """\
+#!/bin/sh
+set -e
+COUNTRY="${TOR_COUNTRY:-}"
+
+mkdir -p /var/lib/tor /run/tor
+chmod 700 /var/lib/tor
+
+printf '%s\\n' \\
+    'SocksPort 127.0.0.1:9050' \\
+    'TransPort 127.0.0.1:9040' \\
+    'DNSPort 127.0.0.1:5353' \\
+    'DataDirectory /var/lib/tor' \\
+    'Log notice stderr' > /etc/tor/torrc
+
+if [ -n "$COUNTRY" ]; then
+    printf 'ExitNodes {%s}\\nStrictNodes 1\\n' "$COUNTRY" >> /etc/tor/torrc
+fi
+
+tor -f /etc/tor/torrc &
+TOR_PID=$!
+
+echo "Waiting for Tor bootstrap (SOCKS port 9050)..."
+i=0
+while [ "$i" -lt 180 ]; do
+    nc -z 127.0.0.1 9050 2>/dev/null && break
+    sleep 2
+    i=$((i+2))
+done
+nc -z 127.0.0.1 9050 2>/dev/null || { echo "Tor bootstrap timed out" >&2; exit 1; }
+sleep 3
+
+echo "Applying transparent proxy rules..."
+
+cat > /tmp/redsocks.conf << 'RCEOF'
+base {
+  log_debug = off;
+  log_info = on;
+  log = stderr;
+  daemon = off;
+  redirector = iptables;
+}
+redsocks {
+  local_ip = 127.0.0.1;
+  local_port = 12345;
+  ip = 127.0.0.1;
+  port = 9050;
+  type = socks5;
+}
+RCEOF
+
+redsocks -c /tmp/redsocks.conf &
+sleep 1
+
+iptables -t nat -F OUTPUT 2>/dev/null || true
+iptables -t nat -A OUTPUT -d 127.0.0.0/8  -j RETURN
+iptables -t nat -A OUTPUT -d 10.0.0.0/8   -j RETURN
+iptables -t nat -A OUTPUT -d 172.16.0.0/12 -j RETURN
+iptables -t nat -A OUTPUT -d 192.168.0.0/16 -j RETURN
+iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-ports 12345
+iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 5353
+
+echo "Tor transparent proxy active. country=${COUNTRY:-any}"
+wait $TOR_PID
+"""
+
 
 class VpnService:
     _cached_data_volume: str | None = None
@@ -1385,9 +1475,109 @@ class VpnService:
             )
 
     @staticmethod
+    def ensure_tor_image() -> None:
+        """Build the Alpine+Tor+redsocks image if it doesn't exist."""
+        dc = _docker_cmd()
+        p = _run(dc + ["image", "inspect", TOR_IMAGE])
+        if p.returncode == 0:
+            return
+        logger.info("VpnService: building %s image", TOR_IMAGE)
+        p = subprocess.run(
+            dc + ["build", "-t", TOR_IMAGE, "-"],
+            input=TOR_DOCKERFILE,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if p.returncode != 0:
+            raise RuntimeError(
+                f"Falha ao construir imagem Tor: {(p.stderr or p.stdout or '').strip()}"
+            )
+
+    @staticmethod
+    def ensure_tor_image() -> None:
+        """Build the Alpine+Tor+redsocks image if it doesn't exist."""
+        dc = _docker_cmd()
+        p = _run(dc + ["image", "inspect", TOR_IMAGE])
+        if p.returncode == 0:
+            return
+        logger.info("VpnService: building %s image", TOR_IMAGE)
+        p = subprocess.run(
+            dc + ["build", "-t", TOR_IMAGE, "-"],
+            input=TOR_DOCKERFILE,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if p.returncode != 0:
+            raise RuntimeError(
+                f"Falha ao construir imagem Tor: {(p.stderr or p.stdout or '').strip()}"
+            )
+
+    @staticmethod
     def start_sidecar(
         name: str,
         vpn_type: str = "openvpn",
+        provider: str = "custom",
+        username: str = "",
+        password: str = "",
+        country: str = "",
+    ) -> None:
+        if vpn_type == "tor":
+            VpnService._start_tor_sidecar(name, country=country)
+        else:
+            VpnService._start_openvpn_sidecar(name, provider=provider, username=username, password=password)
+
+    @staticmethod
+    def _start_tor_sidecar(name: str, country: str = "") -> None:
+        """Start an Alpine+Tor transparent-proxy sidecar."""
+        dc = _docker_cmd()
+        sidecar = VpnService._sidecar_name(name)
+
+        VpnService.ensure_tor_image()
+
+        logger.info("_start_tor_sidecar: removing old sidecar %s (if any)", sidecar)
+        _run(dc + ["rm", "-f", sidecar], timeout=30)
+
+        cmd = dc + [
+            "run", "-d",
+            "--name", sidecar,
+            "--label", "redroid-ui.managed=1",
+            "--label", "redroid-ui.role=vpn",
+            "--label", f"redroid-ui.parent={name}",
+            "--cap-add=NET_ADMIN",
+            "--cap-add=NET_RAW",
+            "-e", f"TOR_COUNTRY={country.strip()[:2].upper() if country else ''}",
+            # No tun device needed — Tor uses iptables REDIRECT, not tun0.
+            # Start on default bridge (has internet access to Tor network).
+            TOR_IMAGE, "sh", "-c", TOR_STARTUP_SCRIPT,
+        ]
+        logger.info("_start_tor_sidecar: %s", " ".join(cmd))
+
+        p = _run(cmd, timeout=120)
+        if p.returncode != 0:
+            raise RuntimeError(
+                f"Falha ao criar sidecar Tor: {(p.stderr or p.stdout or '').strip()}"
+            )
+
+        VpnService._wait_running(name)
+
+        network = getattr(settings, "REDROID_DOCKER_NETWORK", "")
+        if network:
+            p = _run(dc + ["network", "connect", network, sidecar], timeout=30)
+            if p.returncode != 0:
+                logger.warning(
+                    "_start_tor_sidecar: failed to connect %s to %s: %s",
+                    sidecar, network, (p.stderr or p.stdout or "").strip(),
+                )
+            else:
+                logger.info("_start_tor_sidecar: connected %s to %s", sidecar, network)
+
+    @staticmethod
+    def _start_openvpn_sidecar(
+        name: str,
         provider: str = "custom",
         username: str = "",
         password: str = "",
@@ -1396,7 +1586,7 @@ class VpnService:
         sidecar = VpnService._sidecar_name(name)
         vpn_dir = VpnService._vpn_dir(name)
 
-        if provider != "custom" or vpn_type != "openvpn":
+        if provider != "custom":
             raise RuntimeError(
                 "Atualmente apenas VPN custom OpenVPN é suportada. "
                 "Providers nativos requerem o módulo xt_mark do kernel."
@@ -1519,14 +1709,31 @@ class VpnService:
         raise RuntimeError("Sidecar VPN não iniciou a tempo.")
 
     @staticmethod
-    def wait_tunnel(name: str, timeout: int = 30) -> bool:
-        """Wait for the VPN tunnel interface (tun0) to come up."""
+    def wait_tunnel(name: str, timeout: int = 30, vpn_type: str = "openvpn") -> bool:
+        """Wait for the VPN tunnel to be ready.
+
+        - openvpn: check for tun0 interface with an inet address.
+        - tor: check that the SOCKS5 port (9050) is open AND iptables
+          REDIRECT rule is applied (signals bootstrap + proxy active).
+        """
         dc = _docker_cmd()
         sidecar = VpnService._sidecar_name(name)
-        for _ in range(timeout // 2):
-            p = _run(dc + ["exec", sidecar, "ip", "addr", "show", "tun0"], timeout=5)
-            if p.returncode == 0 and "inet " in (p.stdout or ""):
-                return True
+        for _ in range(max(1, timeout // 2)):
+            if vpn_type == "tor":
+                # SOCKS5 open = bootstrap complete
+                p = _run(dc + ["exec", sidecar, "nc", "-z", "127.0.0.1", "9050"], timeout=5)
+                if p.returncode == 0:
+                    # Also verify redsocks iptables rule is applied
+                    p2 = _run(
+                        dc + ["exec", sidecar, "iptables", "-t", "nat", "-L", "OUTPUT", "-n"],
+                        timeout=5,
+                    )
+                    if "REDIRECT" in (p2.stdout or ""):
+                        return True
+            else:
+                p = _run(dc + ["exec", sidecar, "ip", "addr", "show", "tun0"], timeout=5)
+                if p.returncode == 0 and "inet " in (p.stdout or ""):
+                    return True
             time.sleep(2)
         return False
 

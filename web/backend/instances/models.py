@@ -5,6 +5,7 @@ from django.db import models
 class Instance(models.Model):
     VPN_TYPE_CHOICES = [
         ("openvpn", "OpenVPN"),
+        ("tor", "Tor (Whonix-like)"),
         ("wireguard", "WireGuard"),
     ]
 
@@ -23,6 +24,7 @@ class Instance(models.Model):
     vpn_provider = models.CharField(max_length=64, blank=True, default="custom")
     vpn_username = models.CharField(max_length=128, blank=True, default="")
     vpn_password = models.CharField(max_length=128, blank=True, default="")
+    vpn_country = models.CharField(max_length=2, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
