@@ -1489,6 +1489,17 @@ class VpnService:
 
         VpnService._wait_running(name)
 
+        # Neutralize broken iptables mark rules.  Gluetun creates OUTPUT
+        # chain rules with ``-m mark`` for DNS leak prevention even when
+        # FIREWALL=off.  On VPS kernels lacking the ``xt_mark`` module
+        # these rules malfunction and end up blocking ALL traffic, which
+        # kills the VPN ~6 seconds after it connects.  We start a
+        # background loop that flushes the filter OUTPUT chain every 2 s
+        # so the broken rules never accumulate.  With FIREWALL=off the
+        # only filter rules are these mark rules, so flushing is safe
+        # (NAT/Docker DNS rules live in the nat table, unaffected).
+        VpnService._start_iptables_cleaner(name)
+
         # Now attach the sidecar to the internal redroid network so that
         # the backend (and other services) can reach it by container name.
         network = getattr(settings, "REDROID_DOCKER_NETWORK", "")
@@ -1501,6 +1512,39 @@ class VpnService:
                 )
             else:
                 logger.info("start_sidecar: connected %s to %s", sidecar, network)
+
+    @staticmethod
+    def _start_iptables_cleaner(name: str) -> None:
+        """Launch a background loop inside the sidecar that flushes broken
+        iptables mark rules every 2 seconds.
+
+        Gluetun creates ``-m mark … -j DROP`` rules in the filter OUTPUT
+        chain for DNS leak prevention.  On hosts without the ``xt_mark``
+        kernel module these rules corrupt the chain and block all traffic.
+        This detached process keeps the chain clean for the lifetime of
+        the container (dies automatically when the container stops).
+        """
+        dc = _docker_cmd()
+        sidecar = VpnService._sidecar_name(name)
+        # Flush immediately, then loop every 2 s.  Only touches the filter
+        # table OUTPUT chain — NAT rules (Docker DNS) are in a separate table.
+        cleaner_script = (
+            "iptables -F OUTPUT 2>/dev/null; "
+            "iptables -P OUTPUT ACCEPT 2>/dev/null; "
+            "while true; do "
+            "  sleep 2; "
+            "  iptables -F OUTPUT 2>/dev/null; "
+            "  iptables -P OUTPUT ACCEPT 2>/dev/null; "
+            "done"
+        )
+        p = _run(dc + ["exec", "-d", sidecar, "sh", "-c", cleaner_script], timeout=10)
+        if p.returncode != 0:
+            logger.warning(
+                "start_sidecar: failed to start iptables cleaner in %s: %s",
+                sidecar, (p.stderr or p.stdout or "").strip(),
+            )
+        else:
+            logger.info("start_sidecar: iptables cleaner running in %s", sidecar)
 
     @staticmethod
     def _wait_running(name: str, timeout: int = 10) -> None:
