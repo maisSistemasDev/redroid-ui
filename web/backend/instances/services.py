@@ -535,7 +535,9 @@ done
         check = _run(["adb", "-s", serial, "shell", "test -x /touch_inject && echo OK"], timeout=5)
         if "OK" in (check.stdout or ""):
             return
-        container_name = serial.split(":")[0]
+        container_name = _serial_container_name(serial)
+        if not container_name:
+            return
         dc = _docker_cmd()
         _run(dc + ["cp", str(binary), f"{container_name}:/touch_inject"])
         _run(dc + ["exec", container_name, "chmod", "+x", "/touch_inject"])
@@ -689,11 +691,20 @@ def cmd_send_direct(serial: str, cmd: str, timeout: int = 12) -> bool:
 
 
 def _serial_container_name(serial: str) -> str:
+    """Extract the redroid container name from an ADB serial.
+
+    When VPN is active the serial looks like ``{name}-vpn:5555`` but the
+    Android container is simply ``{name}``.  Strip the ``-vpn`` suffix so
+    that ``docker exec`` targets the correct container.
+    """
     host = serial.split(":", 1)[0].strip()
     if not host:
         return ""
     if not re.match(r"^[a-zA-Z0-9_.-]+$", host):
         return ""
+    # VPN sidecar names end with '-vpn'; the redroid container is without.
+    if host.endswith("-vpn"):
+        host = host[:-4]
     return host
 
 
