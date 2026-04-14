@@ -319,7 +319,16 @@ class AdbService:
                 out = f"{p.stdout}\n{p.stderr}".lower()
                 if "connected to" in out or "already connected" in out:
                     return
-                if p.returncode == 0:
+                # Some adb versions may return exit code 0 even when
+                # the target is not actually available yet. Confirm via
+                # `adb devices` before considering the connect successful.
+                d = _run(["adb", "devices"], timeout=10)
+                lines = (d.stdout or "").splitlines()
+                serial_ok = any(
+                    ln.strip().startswith(serial + "\tdevice")
+                    for ln in lines
+                )
+                if serial_ok:
                     return
                 last_exc = RuntimeError(
                     f"Falha ao conectar ADB em {serial}: {(p.stderr or p.stdout).strip()}"

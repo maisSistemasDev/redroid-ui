@@ -266,25 +266,37 @@ class InputConsumer(AsyncWebsocketConsumer):
         await self.accept()
 
         self.serial = instance.serial
+        self.dev = "/dev/input/event18"
         try:
             await asyncio.to_thread(AdbService.connect, self.serial)
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning("InputConsumer: ADB connect failed for %s: %s", self.serial, e)
+            await self.close(code=4002)
+            return
+
+        try:
             self.dev = await asyncio.wait_for(
                 asyncio.to_thread(AdbService.detect_event_device, self.serial), timeout=10
             )
             logger.info("InputConsumer: detected touch device %s for %s", self.dev, self.serial)
-            # Also detect keyboard device (not critical if it fails)
-            try:
-                self.keyboard_dev = await asyncio.wait_for(
-                    asyncio.to_thread(AdbService.detect_keyboard_device, self.serial), timeout=10
-                )
-                logger.info("InputConsumer: detected keyboard device %s for %s", self.keyboard_dev, self.serial)
-            except Exception as e:
-                logger.warning("InputConsumer: keyboard device detection failed for %s: %s", self.serial, e)
-                self.keyboard_dev = None
+            self.fallback_touch_mode = False
         except (asyncio.TimeoutError, Exception) as e:
-            logger.warning("InputConsumer: ADB setup failed for %s: %s", self.serial, e)
-            await self.close(code=4002)
-            return
+            logger.warning(
+                "InputConsumer: touch device detection failed for %s: %s; using ADB fallback mode",
+                self.serial,
+                e,
+            )
+            self.fallback_touch_mode = True
+
+        # Also detect keyboard device (not critical if it fails)
+        try:
+            self.keyboard_dev = await asyncio.wait_for(
+                asyncio.to_thread(AdbService.detect_keyboard_device, self.serial), timeout=10
+            )
+            logger.info("InputConsumer: detected keyboard device %s for %s", self.keyboard_dev, self.serial)
+        except Exception as e:
+            logger.warning("InputConsumer: keyboard device detection failed for %s: %s", self.serial, e)
+            self.keyboard_dev = None
 
     async def receive(self, text_data=None, bytes_data=None):
         if not text_data or not self.serial:
@@ -310,7 +322,7 @@ class InputConsumer(AsyncWebsocketConsumer):
             ax, ay = clamp_coords(data["x"], data["y"])
             self.fallback_last_xy = (ax, ay)
 
-            if FORCE_ADB_INPUT:
+            if FORCE_ADB_INPUT or self.fallback_touch_mode:
                 self._had_move = True
                 if self.fallback_down_xy is None:
                     self.fallback_down_xy = (ax, ay)
@@ -359,7 +371,7 @@ class InputConsumer(AsyncWebsocketConsumer):
             start = self.fallback_down_xy or self.fallback_last_xy
             end = self.fallback_last_xy or start
 
-            if self._pending_down is not None or not self._had_move or FORCE_ADB_INPUT:
+            if self._pending_down is not None or not self._had_move or FORCE_ADB_INPUT or self.fallback_touch_mode:
                 # ── TAP path: no significant movement detected ──
                 # For WhatsApp input fields, use native event injection instead of
                 # high-level "input tap" command, as it's more resistant to filterTouchesWhenObscured
@@ -373,7 +385,7 @@ class InputConsumer(AsyncWebsocketConsumer):
                         # When FORCE_ADB_INPUT, skip native inject (it returns
                         # True but events silently fail in docker environments)
                         # and go straight to cmd_send_root which works reliably.
-                        if not FORCE_ADB_INPUT:
+                        if not (FORCE_ADB_INPUT or self.fallback_touch_mode):
                             # Real tap via native events
                             logger.info("tap: attempting native inject at (%d, %d) on device %s", ex, ey, self.dev)
                             ok = await asyncio.to_thread(inject_events, self.serial, self.dev, [
@@ -444,7 +456,7 @@ class InputConsumer(AsyncWebsocketConsumer):
         elif evt_type == "scroll":
             ax, ay = clamp_coords(data["x"], data["y"])
             scroll_down = data.get("dir") == "down"
-            if FORCE_ADB_INPUT:
+            if FORCE_ADB_INPUT or self.fallback_touch_mode:
                 end_y = max(0, min(1279, ay + (420 if scroll_down else -420)))
                 await asyncio.to_thread(cmd_send_root, self.serial, f"input swipe {ax} {ay} {ax} {end_y} 140")
                 return
@@ -502,7 +514,7 @@ class InputConsumer(AsyncWebsocketConsumer):
 
                 # Try to use virtual keyboard if available (skip when
                 # FORCE_ADB_INPUT — native inject silently fails in docker)
-                if self.keyboard_dev and not FORCE_ADB_INPUT:
+                if self.keyboard_dev and not (FORCE_ADB_INPUT or self.fallback_touch_mode):
                     logger.info("text: using virtual keyboard device %s for '%s'", self.keyboard_dev, txt)
                     for char in txt:
                         keycode = ASCII_TO_KEYCODE.get(char.lower())
