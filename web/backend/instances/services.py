@@ -770,7 +770,7 @@ def _install_apk_via_docker_exec(serial: str, apk_path: str, container_hint: str
         # pm install should output "Success" on success.
         cmd = f"pm install -r {shlex.quote(dst)}"
         try:
-            p = _run(_docker_cmd() + ["exec", cname, "sh", "-lc", cmd], timeout=300)
+            p = _run(_docker_cmd() + ["exec", cname, "sh", "-c", cmd], timeout=300)
         except subprocess.TimeoutExpired:
             logger.warning("install_apk fallback: pm install timed out for %s", cname)
             return False, "pm install timeout (300s)"
@@ -786,7 +786,7 @@ def _install_apk_via_docker_exec(serial: str, apk_path: str, container_hint: str
             return False, f"pm install rc={p.returncode}: {out}"
         return True, "ok"
     finally:
-        _run(_docker_cmd() + ["exec", cname, "sh", "-lc", f"rm -f {shlex.quote(dst)}"], timeout=30)
+        _run(_docker_cmd() + ["exec", cname, "sh", "-c", f"rm -f {shlex.quote(dst)}"], timeout=30)
 
 
 def cmd_send_best_effort(serial: str, cmd: str, timeout: int = 12) -> bool:
@@ -802,7 +802,7 @@ def cmd_send_best_effort(serial: str, cmd: str, timeout: int = 12) -> bool:
         logger.warning("cmd_send_best_effort: invalid container name from serial %s", serial)
         return False
 
-    p = _run(_docker_cmd() + ["exec", cname, "sh", "-lc", cmd], timeout=timeout)
+    p = _run(_docker_cmd() + ["exec", cname, "sh", "-c", cmd], timeout=timeout)
     ok = p.returncode == 0
     if not ok:
         logger.warning(
@@ -829,7 +829,7 @@ def cmd_send_root(serial: str, cmd: str, timeout: int = 12) -> bool:
     """
     cname = _serial_container_name(serial)
     if cname:
-        p = _run(_docker_cmd() + ["exec", cname, "sh", "-lc", cmd], timeout=timeout)
+        p = _run(_docker_cmd() + ["exec", cname, "sh", "-c", cmd], timeout=timeout)
         if p.returncode == 0:
             return True
         # Log failure for debugging
