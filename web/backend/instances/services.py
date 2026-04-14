@@ -1330,11 +1330,16 @@ class VpnService:
             if password:
                 _e("WIREGUARD_ADDRESSES", password)
 
-        # Allow ADB (5555) from the local Docker network.
-        _e("FIREWALL_INPUT_PORTS", "5555")
-        # Also allow inbound on the VPN interface (for port-forwarded
-        # scenarios or future use).
-        _e("FIREWALL_VPN_INPUT_PORTS", "5555")
+        # Disable Gluetun's built-in iptables firewall (kill switch).
+        # Gluetun's firewall rules use iptables mark matching (-m mark)
+        # which requires the xt_mark kernel module.  Many VPS kernels
+        # (Hetzner, OVH, etc.) lack this module, causing ALL firewall
+        # rules to fail — which paradoxically blocks all traffic and
+        # kills the VPN after a few seconds.  Disabling the firewall
+        # still lets OpenVPN/WireGuard handle routing via their own
+        # redirect-gateway / AllowedIPs mechanisms; we just lose the
+        # kill-switch (acceptable for containerised Android instances).
+        _e("FIREWALL", "off")
 
         # Use plain (UDP) DNS instead of the default DNS-over-TLS.
         # DoT (port 853) is blocked by some VPN providers (e.g.
@@ -1443,9 +1448,11 @@ class VpnService:
         ]
         cmd += gluetun_vol
         cmd += env_list
-        network = getattr(settings, "REDROID_DOCKER_NETWORK", "")
-        if network:
-            cmd += ["--network", network]
+        # Do NOT attach to the REDROID_DOCKER_NETWORK at creation time.
+        # That network is typically an internal Docker bridge with no
+        # internet gateway.  Gluetun needs internet access on its default
+        # interface (eth0) to reach the VPN server.  We connect it to
+        # the redroid network AFTER the container is running.
         cmd += [GLUETUN_IMAGE]
 
         # Log the full docker run command (mask passwords)
@@ -1462,6 +1469,19 @@ class VpnService:
             )
 
         VpnService._wait_running(name)
+
+        # Now attach the sidecar to the internal redroid network so that
+        # the backend (and other services) can reach it by container name.
+        network = getattr(settings, "REDROID_DOCKER_NETWORK", "")
+        if network:
+            p = _run(dc + ["network", "connect", network, sidecar], timeout=30)
+            if p.returncode != 0:
+                logger.warning(
+                    "start_sidecar: failed to connect %s to %s: %s",
+                    sidecar, network, (p.stderr or p.stdout or "").strip(),
+                )
+            else:
+                logger.info("start_sidecar: connected %s to %s", sidecar, network)
 
     @staticmethod
     def _wait_running(name: str, timeout: int = 10) -> None:
