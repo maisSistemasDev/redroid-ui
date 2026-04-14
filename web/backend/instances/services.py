@@ -1336,6 +1336,12 @@ class VpnService:
         # scenarios or future use).
         _e("FIREWALL_VPN_INPUT_PORTS", "5555")
 
+        # Disable Gluetun's built-in DNS-over-TLS proxy.  Some VPN
+        # providers (e.g. TunnelBear) block port 853 which breaks DoT.
+        # With DOT=off DNS queries go through the VPN tunnel normally
+        # using the servers from the .ovpn dhcp-option directives.
+        _e("DOT", "off")
+
         return env_flags
 
     @staticmethod
