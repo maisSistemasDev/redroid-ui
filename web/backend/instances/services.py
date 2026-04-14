@@ -306,11 +306,30 @@ def _short(msg: str, limit: int = 400) -> str:
 
 class AdbService:
     @staticmethod
-    def connect(serial: str) -> None:
-        p = _run(["adb", "connect", serial], timeout=15)
-        out = f"{p.stdout}\n{p.stderr}".lower()
-        if p.returncode != 0 and "connected to" not in out and "already connected" not in out:
-            raise RuntimeError(f"Falha ao conectar ADB em {serial}: {(p.stderr or p.stdout).strip()}")
+    def connect(serial: str, retries: int = 6, interval: int = 5) -> None:
+        """Connect ADB to the given serial, retrying on timeout.
+
+        Freshly-created containers (especially with VPN sidecar) can take
+        30-60 s before the ADB daemon starts listening on port 5555.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                p = _run(["adb", "connect", serial], timeout=15)
+                out = f"{p.stdout}\n{p.stderr}".lower()
+                if "connected to" in out or "already connected" in out:
+                    return
+                if p.returncode == 0:
+                    return
+                last_exc = RuntimeError(
+                    f"Falha ao conectar ADB em {serial}: {(p.stderr or p.stdout).strip()}"
+                )
+            except subprocess.TimeoutExpired as exc:
+                last_exc = exc
+            if attempt < retries:
+                logger.info("ADB connect attempt %d/%d failed for %s, retrying in %ds", attempt, retries, serial, interval)
+                time.sleep(interval)
+        raise last_exc  # type: ignore[misc]
 
     @staticmethod
     def wait_boot(serial: str, timeout: int = 30) -> bool:
