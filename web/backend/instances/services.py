@@ -1189,43 +1189,35 @@ class VpnService:
         return f"{name}-vpn"
 
     @staticmethod
-    def store_config(name: str, ovpn_content: str, username: str = "", password: str = "") -> Path:
-        """Store a custom .ovpn config for the given instance.
+    def _sanitize_ovpn(ovpn_content: str) -> str:
+        """Sanitize a custom .ovpn config for Gluetun compatibility.
 
-        Gluetun requires IP addresses in ``remote`` directives (not hostnames).
-        We resolve any hostnames to IPs before writing the config.
+        1. Resolve hostnames in ``remote`` directives to IPs.
+        2. Remove file-path directives (ca, cert, key, tls-auth, tls-crypt)
+           when the corresponding inline block is present.
         """
-        vpn_dir = VpnService._vpn_dir(name)
-        vpn_dir.mkdir(parents=True, exist_ok=True)
-
-        # Resolve hostnames in 'remote' lines to IPs (Gluetun requirement).
+        # --- Step 1: resolve hostnames in 'remote' lines ---
         resolved_lines: list[str] = []
         for ln in ovpn_content.splitlines():
             stripped = ln.strip()
             if stripped.startswith("remote "):
                 parts = stripped.split()
-                # Format: remote <host> [port] [proto]
                 if len(parts) >= 2:
                     host = parts[1]
                     try:
                         socket.inet_aton(host)
-                        # Already an IP address — keep as-is.
                     except OSError:
-                        # It's a hostname — resolve it.
                         try:
                             ip = socket.gethostbyname(host)
-                            logger.info("VPN store_config: resolved %s -> %s", host, ip)
+                            logger.info("VPN _sanitize_ovpn: resolved %s -> %s", host, ip)
                             parts[1] = ip
                             ln = " ".join(parts)
                         except socket.gaierror:
-                            logger.warning("VPN store_config: could not resolve %s, keeping hostname", host)
+                            logger.warning("VPN _sanitize_ovpn: could not resolve %s, keeping hostname", host)
             resolved_lines.append(ln)
         ovpn_content = "\n".join(resolved_lines) + "\n"
 
-        # When inline blocks (<ca>, <cert>, <key>, <tls-auth>, <tls-crypt>)
-        # are present, remove the corresponding file-path directives
-        # (e.g. "ca openvpn-server-ca.crt") because the files don't exist
-        # inside the Gluetun container and would cause an error.
+        # --- Step 2: remove file-path directives when inline blocks exist ---
         inline_tags = {"ca", "cert", "key", "tls-auth", "tls-crypt"}
         found_inline = set()
         for ln in ovpn_content.splitlines():
@@ -1239,14 +1231,23 @@ class VpnService:
                 s = ln.strip()
                 skip = False
                 for tag in found_inline:
-                    # Match "ca somefile.crt" but NOT "<ca>" or "</ca>"
                     if s.startswith(tag + " ") and not s.startswith("<"):
-                        logger.info("VPN store_config: removing redundant directive: %s", s)
+                        logger.info("VPN _sanitize_ovpn: removing redundant directive: %s", s)
                         skip = True
                         break
                 if not skip:
                     cleaned.append(ln)
             ovpn_content = "\n".join(cleaned) + "\n"
+
+        return ovpn_content
+
+    @staticmethod
+    def store_config(name: str, ovpn_content: str, username: str = "", password: str = "") -> Path:
+        """Store a custom .ovpn config for the given instance."""
+        vpn_dir = VpnService._vpn_dir(name)
+        vpn_dir.mkdir(parents=True, exist_ok=True)
+
+        ovpn_content = VpnService._sanitize_ovpn(ovpn_content)
 
         config_path = vpn_dir / "custom.conf"
         config_path.write_text(ovpn_content, encoding="utf-8")
@@ -1328,6 +1329,19 @@ class VpnService:
 
         is_custom_openvpn = provider == "custom" and vpn_type == "openvpn"
         is_custom_wireguard = provider == "custom" and vpn_type == "wireguard"
+
+        # Handle legacy filename (config.ovpn → custom.conf) and re-sanitize.
+        if is_custom_openvpn:
+            legacy = vpn_dir / "config.ovpn"
+            target = vpn_dir / "custom.conf"
+            if legacy.exists() and not target.exists():
+                legacy.rename(target)
+            if target.exists():
+                raw = target.read_text(encoding="utf-8")
+                sanitized = VpnService._sanitize_ovpn(raw)
+                if sanitized != raw:
+                    target.write_text(sanitized, encoding="utf-8")
+                    logger.info("start_sidecar: re-sanitized config for %s", name)
 
         if is_custom_openvpn and not (vpn_dir / "custom.conf").exists():
             raise RuntimeError("Arquivo de configuração VPN (.ovpn) não encontrado.")
