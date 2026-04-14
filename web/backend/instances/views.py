@@ -84,6 +84,8 @@ class InstanceViewSet(viewsets.ModelViewSet):
             "gpu_mode": d["gpu_mode"],
             "extra_props": d.get("extra_props", ""),
             "vpn_enabled": d.get("vpn_enabled", False),
+            "vpn_type": d.get("vpn_type", "openvpn"),
+            "vpn_provider": d.get("vpn_provider", "custom"),
             "vpn_config": d.get("vpn_config", ""),
             "vpn_ca_cert": d.get("vpn_ca_cert", ""),
             "vpn_username": d.get("vpn_username", ""),
@@ -137,7 +139,13 @@ class InstanceViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         try:
             if instance.vpn_enabled:
-                VpnService.start_sidecar(instance.name)
+                VpnService.start_sidecar(
+                    instance.name,
+                    vpn_type=instance.vpn_type,
+                    provider=instance.vpn_provider,
+                    username=instance.vpn_username,
+                    password=instance.vpn_password,
+                )
                 VpnService.wait_tunnel(instance.name, timeout=20)
             DockerService.start(instance.name)
             TouchService.setup_virtual_touch(instance.name)
@@ -241,6 +249,8 @@ class InstanceViewSet(viewsets.ModelViewSet):
         d = ser.validated_data
 
         vpn_enabled = d.get("vpn_enabled", True)
+        vpn_type = d.get("vpn_type", "openvpn")
+        vpn_provider = d.get("vpn_provider", "custom")
         vpn_config = d.get("vpn_config", "")
         vpn_ca_cert = d.get("vpn_ca_cert", "")
         vpn_username = d.get("vpn_username", "")
@@ -250,9 +260,11 @@ class InstanceViewSet(viewsets.ModelViewSet):
             VpnService.store_config(instance.name, vpn_config, vpn_username, vpn_password, ca_cert=vpn_ca_cert)
 
         instance.vpn_enabled = vpn_enabled
+        instance.vpn_type = vpn_type
+        instance.vpn_provider = vpn_provider
         instance.vpn_username = vpn_username
         instance.vpn_password = vpn_password
-        instance.save(update_fields=["vpn_enabled", "vpn_username", "vpn_password"])
+        instance.save(update_fields=["vpn_enabled", "vpn_type", "vpn_provider", "vpn_username", "vpn_password"])
 
         if not vpn_enabled:
             try:
