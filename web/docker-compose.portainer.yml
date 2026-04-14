@@ -33,7 +33,7 @@ services:
           - virtuale-redis
 
   api:
-    image: maissistemasdev/redroid-cloud-be:2.2
+    image: maissistemasdev/redroid-cloud-be:3.0
     container_name: virtuale-be
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -67,7 +67,7 @@ services:
       - proxy-network
 
   worker:
-    image: maissistemasdev/redroid-cloud-be:2.2
+    image: maissistemasdev/redroid-cloud-be:3.0
     container_name: virtuale-worker
     command: celery -A config worker -l info
     volumes:

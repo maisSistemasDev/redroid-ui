@@ -1194,7 +1194,8 @@ class VpnService:
 
         1. Resolve hostnames in ``remote`` directives to IPs.
         2. Remove file-path directives (ca, cert, key, tls-auth, tls-crypt)
-           when the corresponding inline block is present.
+           that reference external files — they never exist inside the
+           Gluetun container regardless of whether inline blocks are present.
         """
         # --- Step 1: resolve hostnames in 'remote' lines ---
         resolved_lines: list[str] = []
@@ -1217,27 +1218,25 @@ class VpnService:
             resolved_lines.append(ln)
         ovpn_content = "\n".join(resolved_lines) + "\n"
 
-        # --- Step 2: remove file-path directives when inline blocks exist ---
-        inline_tags = {"ca", "cert", "key", "tls-auth", "tls-crypt"}
-        found_inline = set()
+        # --- Step 2: remove external file-path directives ---
+        # In the Gluetun container, external files referenced by ca, cert,
+        # key, tls-auth, tls-crypt NEVER exist.  Remove these directives
+        # unconditionally (whether or not inline <ca>...</ca> blocks exist).
+        # Lines like "<ca>" or "</ca>" are kept — only "ca somefile.crt" is removed.
+        file_directives = {"ca", "cert", "key", "tls-auth", "tls-crypt"}
+        cleaned: list[str] = []
         for ln in ovpn_content.splitlines():
             s = ln.strip()
-            for tag in inline_tags:
-                if s == f"<{tag}>":
-                    found_inline.add(tag)
-        if found_inline:
-            cleaned: list[str] = []
-            for ln in ovpn_content.splitlines():
-                s = ln.strip()
-                skip = False
-                for tag in found_inline:
-                    if s.startswith(tag + " ") and not s.startswith("<"):
-                        logger.info("VPN _sanitize_ovpn: removing redundant directive: %s", s)
+            skip = False
+            if not s.startswith("<"):
+                for directive in file_directives:
+                    if s == directive or s.startswith(directive + " "):
+                        logger.info("VPN _sanitize_ovpn: removing file-path directive: %s", s)
                         skip = True
                         break
-                if not skip:
-                    cleaned.append(ln)
-            ovpn_content = "\n".join(cleaned) + "\n"
+            if not skip:
+                cleaned.append(ln)
+        ovpn_content = "\n".join(cleaned) + "\n"
 
         return ovpn_content
 
