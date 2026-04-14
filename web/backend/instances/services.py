@@ -1446,6 +1446,13 @@ class VpnService:
             cmd += ["--network", network]
         cmd += [GLUETUN_IMAGE]
 
+        # Log the full docker run command (mask passwords)
+        safe_cmd = [
+            x if not any(k in x for k in ("PASSWORD=", "USER=")) else x.split("=")[0] + "=***"
+            for x in cmd
+        ]
+        logger.info("start_sidecar: docker run command: %s", " ".join(safe_cmd))
+
         p = _run(cmd, timeout=120)
         if p.returncode != 0:
             raise RuntimeError(
