@@ -1331,16 +1331,19 @@ class VpnService:
         is_custom_wireguard = provider == "custom" and vpn_type == "wireguard"
 
         # Handle legacy filename (config.ovpn → custom.conf) and re-sanitize.
+        config_changed = False
         if is_custom_openvpn:
             legacy = vpn_dir / "config.ovpn"
             target = vpn_dir / "custom.conf"
             if legacy.exists() and not target.exists():
                 legacy.rename(target)
+                config_changed = True
             if target.exists():
                 raw = target.read_text(encoding="utf-8")
                 sanitized = VpnService._sanitize_ovpn(raw)
                 if sanitized != raw:
                     target.write_text(sanitized, encoding="utf-8")
+                    config_changed = True
                     logger.info("start_sidecar: re-sanitized config for %s", name)
 
         if is_custom_openvpn and not (vpn_dir / "custom.conf").exists():
@@ -1348,15 +1351,21 @@ class VpnService:
         if is_custom_wireguard and not (vpn_dir / "wg0.conf").exists():
             raise RuntimeError("Arquivo de configuração WireGuard (wg0.conf) não encontrado.")
 
-        # Try to start existing container first.
-        p = _run(dc + ["start", sidecar])
-        if p.returncode == 0:
-            try:
-                VpnService._wait_running(name)
-                return
-            except RuntimeError:
-                logger.warning("start_sidecar: existing %s crashed, recreating", sidecar)
-                _run(dc + ["rm", "-f", sidecar], timeout=30)
+        # If config was modified, force-recreate the sidecar so Gluetun
+        # picks up the new file (it caches config at startup).
+        if config_changed:
+            logger.info("start_sidecar: config changed, forcing recreate of %s", sidecar)
+            _run(dc + ["rm", "-f", sidecar], timeout=30)
+        else:
+            # Try to start existing container first.
+            p = _run(dc + ["start", sidecar])
+            if p.returncode == 0:
+                try:
+                    VpnService._wait_running(name)
+                    return
+                except RuntimeError:
+                    logger.warning("start_sidecar: existing %s crashed, recreating", sidecar)
+                    _run(dc + ["rm", "-f", sidecar], timeout=30)
 
         # Remove leftover stopped container.
         _run(dc + ["rm", "-f", sidecar], timeout=30)
