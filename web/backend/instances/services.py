@@ -1203,6 +1203,9 @@ class VpnService:
         2. Remove file-path directives (ca, cert, key, tls-auth, tls-crypt)
            that reference external files — they won't exist inside the
            sidecar container.
+        3. Add persist-tun/persist-key for stable reconnections.
+        4. Add explicit host routes for VPN server IPs via original
+           gateway so that reconnection works after redirect-gateway.
         """
         # --- Step 1: resolve hostnames in 'remote' lines ---
         resolved_lines: list[str] = []
@@ -1240,6 +1243,42 @@ class VpnService:
             if not skip:
                 cleaned.append(ln)
         ovpn_content = "\n".join(cleaned) + "\n"
+
+        # --- Step 3: add persist-tun / persist-key ---
+        # These prevent the tun device and keys from being torn down
+        # during soft restarts (SIGUSR1), enabling cleaner reconnection.
+        existing = ovpn_content.lower()
+        extras: list[str] = []
+        if "persist-tun" not in existing:
+            extras.append("persist-tun")
+        if "persist-key" not in existing:
+            extras.append("persist-key")
+
+        # --- Step 4: add host routes for VPN server IPs ---
+        # When OpenVPN uses redirect-gateway, it re-routes all traffic
+        # through tun0.  If the tunnel drops, the VPN server becomes
+        # unreachable because all traffic still goes to tun0.
+        # Adding an explicit route via ``net_gateway`` (OpenVPN macro for
+        # the pre-existing default gateway) ensures the VPN server is
+        # always reachable through the container's original eth0 route.
+        server_ips: list[str] = []
+        for ln in ovpn_content.splitlines():
+            s = ln.strip()
+            if s.startswith("remote "):
+                parts = s.split()
+                if len(parts) >= 2:
+                    try:
+                        socket.inet_aton(parts[1])
+                        server_ips.append(parts[1])
+                    except OSError:
+                        pass
+        for sip in server_ips:
+            route_line = f"route {sip} 255.255.255.255 net_gateway"
+            if route_line not in ovpn_content:
+                extras.append(route_line)
+
+        if extras:
+            ovpn_content += "\n".join(extras) + "\n"
 
         return ovpn_content
 
