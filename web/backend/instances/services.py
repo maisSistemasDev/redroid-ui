@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -1189,9 +1190,38 @@ class VpnService:
 
     @staticmethod
     def store_config(name: str, ovpn_content: str, username: str = "", password: str = "") -> Path:
-        """Store a custom .ovpn config for the given instance."""
+        """Store a custom .ovpn config for the given instance.
+
+        Gluetun requires IP addresses in ``remote`` directives (not hostnames).
+        We resolve any hostnames to IPs before writing the config.
+        """
         vpn_dir = VpnService._vpn_dir(name)
         vpn_dir.mkdir(parents=True, exist_ok=True)
+
+        # Resolve hostnames in 'remote' lines to IPs (Gluetun requirement).
+        resolved_lines: list[str] = []
+        for ln in ovpn_content.splitlines():
+            stripped = ln.strip()
+            if stripped.startswith("remote "):
+                parts = stripped.split()
+                # Format: remote <host> [port] [proto]
+                if len(parts) >= 2:
+                    host = parts[1]
+                    try:
+                        socket.inet_aton(host)
+                        # Already an IP address — keep as-is.
+                    except OSError:
+                        # It's a hostname — resolve it.
+                        try:
+                            ip = socket.gethostbyname(host)
+                            logger.info("VPN store_config: resolved %s -> %s", host, ip)
+                            parts[1] = ip
+                            ln = " ".join(parts)
+                        except socket.gaierror:
+                            logger.warning("VPN store_config: could not resolve %s, keeping hostname", host)
+            resolved_lines.append(ln)
+        ovpn_content = "\n".join(resolved_lines) + "\n"
+
         config_path = vpn_dir / "custom.conf"
         config_path.write_text(ovpn_content, encoding="utf-8")
 
