@@ -267,6 +267,7 @@ class InputConsumer(AsyncWebsocketConsumer):
 
         self.serial = instance.serial
         self.dev = "/dev/input/event18"
+        self.fallback_touch_mode = bool(instance.vpn_enabled)
         try:
             await asyncio.to_thread(AdbService.connect, self.serial)
         except (asyncio.TimeoutError, Exception) as e:
@@ -274,19 +275,24 @@ class InputConsumer(AsyncWebsocketConsumer):
             await self.close(code=4002)
             return
 
-        try:
-            self.dev = await asyncio.wait_for(
-                asyncio.to_thread(AdbService.detect_event_device, self.serial), timeout=10
-            )
-            logger.info("InputConsumer: detected touch device %s for %s", self.dev, self.serial)
-            self.fallback_touch_mode = False
-        except (asyncio.TimeoutError, Exception) as e:
-            logger.warning(
-                "InputConsumer: touch device detection failed for %s: %s; using ADB fallback mode",
+        if self.fallback_touch_mode:
+            logger.info(
+                "InputConsumer: VPN enabled for %s; forcing ADB fallback input mode",
                 self.serial,
-                e,
             )
-            self.fallback_touch_mode = True
+        else:
+            try:
+                self.dev = await asyncio.wait_for(
+                    asyncio.to_thread(AdbService.detect_event_device, self.serial), timeout=10
+                )
+                logger.info("InputConsumer: detected touch device %s for %s", self.dev, self.serial)
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(
+                    "InputConsumer: touch device detection failed for %s: %s; using ADB fallback mode",
+                    self.serial,
+                    e,
+                )
+                self.fallback_touch_mode = True
 
         # Also detect keyboard device (not critical if it fails)
         try:
