@@ -1,0 +1,115 @@
+services:
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: redroid_saas
+      POSTGRES_USER: redroid
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-redroid_dev_pass}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U redroid -d redroid_saas"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - instance_data:/data/instances
+    environment:
+      DATABASE_URL: postgres://redroid:${POSTGRES_PASSWORD:-redroid_dev_pass}@db:5432/redroid_saas
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      DEBUG: ${DEBUG:-0}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      TOOLS_DIR: /opt/redroid-ui/tools
+      REDROID_SCRIPT_DIR: /opt/redroid-ui/redroid-script
+      DATA_ROOT: /data/instances
+      REDROID_USE_SUDO_DOCKER: "0"
+      REDROID_DOCKER_NETWORK: redroid-ui_redroid
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - internal
+      - redroid
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: celery -A config worker -l info
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - instance_data:/data/instances
+    environment:
+      DATABASE_URL: postgres://redroid:${POSTGRES_PASSWORD:-redroid_dev_pass}@db:5432/redroid_saas
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      DEBUG: ${DEBUG:-0}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      TOOLS_DIR: /opt/redroid-ui/tools
+      REDROID_SCRIPT_DIR: /opt/redroid-ui/redroid-script
+      DATA_ROOT: /data/instances
+      REDROID_USE_SUDO_DOCKER: "0"
+      REDROID_DOCKER_NETWORK: redroid-ui_redroid
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+      - redroid
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - api
+    networks:
+      - internal
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - internal
+
+networks:
+  internal:
+  redroid:
+
+volumes:
+  pgdata:
+  instance_data:

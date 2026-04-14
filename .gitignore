@@ -1,0 +1,6 @@
+node_modules/
+python/.venv/
+python/__pycache__/
+*.pyc
+.DS_Store
+redroid-script/

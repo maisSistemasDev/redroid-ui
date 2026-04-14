@@ -1,0 +1,112 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: redroid-cloud-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-redroid_saas}
+      POSTGRES_USER: ${POSTGRES_USER:-redroid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - redroid-cloud-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-redroid} -d ${POSTGRES_DB:-redroid_saas}"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: redroid-cloud-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    networks:
+      - internal
+
+  backend:
+    image: maissistemasdev/redroid-cloud-be:latest
+    container_name: redroid-cloud-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-redroid}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-redroid_saas}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: ${DEBUG:-0}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      TOOLS_DIR: /opt/redroid-ui/tools
+      REDROID_SCRIPT_DIR: /opt/redroid-ui/redroid-script
+      DATA_ROOT: /data/instances
+      DATA_VOLUME: redroid-cloud-instance-data
+      REDROID_USE_SUDO_DOCKER: "0"
+      REDROID_DOCKER_NETWORK: ${REDROID_DOCKER_NETWORK:-redroid-runtime}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - redroid-cloud-instance-data:/data/instances
+    networks:
+      - internal
+      - proxy
+      - redroid
+
+  worker:
+    image: maissistemasdev/redroid-cloud-be:latest
+    container_name: redroid-cloud-worker
+    restart: unless-stopped
+    command: celery -A config worker -l info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-redroid}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-redroid_saas}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: ${DEBUG:-0}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      TOOLS_DIR: /opt/redroid-ui/tools
+      REDROID_SCRIPT_DIR: /opt/redroid-ui/redroid-script
+      DATA_ROOT: /data/instances
+      DATA_VOLUME: redroid-cloud-instance-data
+      REDROID_USE_SUDO_DOCKER: "0"
+      REDROID_DOCKER_NETWORK: ${REDROID_DOCKER_NETWORK:-redroid-runtime}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - redroid-cloud-instance-data:/data/instances
+    networks:
+      - internal
+      - redroid
+
+  frontend:
+    image: maissistemasdev/redroid-cloud-fe:latest
+    container_name: redroid-cloud-frontend
+    restart: unless-stopped
+    networks:
+      - internal
+      - proxy
+
+networks:
+  internal:
+    name: redroid-cloud-internal
+  proxy:
+    external: true
+    name: ${NPM_NETWORK:-npm_proxy}
+  redroid:
+    external: true
+    name: ${REDROID_DOCKER_NETWORK:-redroid-runtime}
+
+volumes:
+  redroid-cloud-pgdata:
+  redroid-cloud-instance-data:

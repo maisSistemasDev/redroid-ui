@@ -1,0 +1,9 @@
+django>=5.1
+djangorestframework>=3.15
+djangorestframework-simplejwt>=5.4
+django-cors-headers>=4.6
+django-environ>=0.12
+channels[daphne]>=4.2
+channels-redis>=4.2
+psycopg[binary]>=3.2
+celery[redis]>=5.4
