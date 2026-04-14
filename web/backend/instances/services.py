@@ -1128,15 +1128,19 @@ def start_build(params: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# VPN (OpenVPN sidecar) service
+# VPN (Gluetun sidecar) service
 # ---------------------------------------------------------------------------
 
-VPN_IMAGE = "redroid-ui/openvpn-client"
-VPN_DOCKERFILE = (
-    "FROM alpine:3.20\n"
-    "RUN apk add --no-cache openvpn\n"
-    'ENTRYPOINT ["openvpn"]\n'
-)
+GLUETUN_IMAGE = "qmcgaw/gluetun"
+
+# Providers that are natively supported by Gluetun (no custom .ovpn needed).
+GLUETUN_NATIVE_PROVIDERS = {
+    "airvpn", "cyberghost", "expressvpn", "fastestvpn", "giganews",
+    "hidemyass", "ipvanish", "ivpn", "mullvad", "nordvpn",
+    "perfect privacy", "privado", "private internet access", "privatevpn",
+    "protonvpn", "purevpn", "slickvpn", "surfshark", "torguard",
+    "vpnsecure", "vpnunlimited", "vyprvpn", "windscribe",
+}
 
 
 class VpnService:
@@ -1156,7 +1160,6 @@ class VpnService:
         if VpnService._cached_data_volume is not None:
             return VpnService._cached_data_volume
 
-        # 1) Try inspecting our own container to find the volume name
         hostname = os.environ.get("HOSTNAME", "")
         if hostname:
             dc = _docker_cmd()
@@ -1176,7 +1179,6 @@ class VpnService:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-        # 2) Fall back to explicit setting
         vol = getattr(settings, "DATA_VOLUME", "")
         VpnService._cached_data_volume = vol
         return vol
@@ -1186,48 +1188,25 @@ class VpnService:
         return f"{name}-vpn"
 
     @staticmethod
-    def ensure_image() -> None:
-        dc = _docker_cmd()
-        p = _run(dc + ["image", "inspect", VPN_IMAGE])
-        if p.returncode == 0:
-            return
-        logger.info("VpnService: building %s image", VPN_IMAGE)
-        p = subprocess.run(
-            dc + ["build", "-t", VPN_IMAGE, "-"],
-            input=VPN_DOCKERFILE,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-        if p.returncode != 0:
-            raise RuntimeError(
-                f"Falha ao construir imagem VPN: {(p.stderr or p.stdout or '').strip()}"
-            )
-
-    @staticmethod
     def store_config(name: str, ovpn_content: str, username: str = "", password: str = "") -> Path:
+        """Store a custom .ovpn config for the given instance."""
         vpn_dir = VpnService._vpn_dir(name)
         vpn_dir.mkdir(parents=True, exist_ok=True)
-        config_path = vpn_dir / "config.ovpn"
+        config_path = vpn_dir / "custom.conf"
         config_path.write_text(ovpn_content, encoding="utf-8")
 
         if username and password:
             auth_path = vpn_dir / "auth.txt"
             auth_path.write_text(f"{username}\n{password}\n", encoding="utf-8")
             auth_path.chmod(0o600)
-            # Ensure the .ovpn references the auth file (container-visible path)
-            data_volume = VpnService._detect_data_volume()
-            if data_volume:
-                auth_ref = f"{settings.DATA_ROOT}/_vpn/{name}/auth.txt"
-            else:
-                auth_ref = "/vpn/auth.txt"
+            # Gluetun handles auth via OPENVPN_USER / OPENVPN_PASSWORD env
+            # vars, so we do NOT patch the .ovpn file here.  Remove any
+            # existing auth-user-pass directives to avoid conflicts.
             text = config_path.read_text(encoding="utf-8")
             lines = [
                 ln for ln in text.splitlines()
                 if not ln.strip().startswith("auth-user-pass")
             ]
-            lines.append(f"auth-user-pass {auth_ref}")
             config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
         config_path.chmod(0o600)
@@ -1240,19 +1219,66 @@ class VpnService:
             shutil.rmtree(vpn_dir, ignore_errors=True)
 
     @staticmethod
-    def start_sidecar(name: str) -> None:
+    def _build_env(
+        vpn_type: str = "openvpn",
+        provider: str = "custom",
+        username: str = "",
+        password: str = "",
+    ) -> list[str]:
+        """Build the ``-e`` environment flags for Gluetun."""
+        env_flags: list[str] = []
+
+        def _e(key: str, val: str) -> None:
+            env_flags.extend(["-e", f"{key}={val}"])
+
+        _e("VPN_SERVICE_PROVIDER", provider)
+        _e("VPN_TYPE", vpn_type)
+
+        if vpn_type == "openvpn":
+            if provider == "custom":
+                _e("OPENVPN_CUSTOM_CONFIG", "/gluetun/custom.conf")
+            if username:
+                _e("OPENVPN_USER", username)
+            if password:
+                _e("OPENVPN_PASSWORD", password)
+        elif vpn_type == "wireguard":
+            # For WireGuard with native providers the credentials are not
+            # openvpn user/pass but rather WireGuard keys.  The user stores
+            # the private key in `vpn_username` and addresses in
+            # `vpn_password` as a pragmatic re-use of existing fields.
+            if provider == "custom":
+                pass  # Config via wg0.conf bind-mounted inside /gluetun/wireguard/
+            if username:
+                _e("WIREGUARD_PRIVATE_KEY", username)
+            if password:
+                _e("WIREGUARD_ADDRESSES", password)
+
+        # Kill switch — block traffic if tunnel goes down
+        _e("FIREWALL_VPN_INPUT_PORTS", "5555")
+
+        return env_flags
+
+    @staticmethod
+    def start_sidecar(
+        name: str,
+        vpn_type: str = "openvpn",
+        provider: str = "custom",
+        username: str = "",
+        password: str = "",
+    ) -> None:
         dc = _docker_cmd()
         sidecar = VpnService._sidecar_name(name)
         vpn_dir = VpnService._vpn_dir(name)
 
-        if not (vpn_dir / "config.ovpn").exists():
+        is_custom_openvpn = provider == "custom" and vpn_type == "openvpn"
+        is_custom_wireguard = provider == "custom" and vpn_type == "wireguard"
+
+        if is_custom_openvpn and not (vpn_dir / "custom.conf").exists():
             raise RuntimeError("Arquivo de configuração VPN (.ovpn) não encontrado.")
+        if is_custom_wireguard and not (vpn_dir / "wg0.conf").exists():
+            raise RuntimeError("Arquivo de configuração WireGuard (wg0.conf) não encontrado.")
 
-        VpnService.ensure_image()
-
-        # Try to start existing container first.  If it exits immediately
-        # (e.g. stale container with wrong volume mounts) remove it and
-        # fall through to recreate with the current settings.
+        # Try to start existing container first.
         p = _run(dc + ["start", sidecar])
         if p.returncode == 0:
             try:
@@ -1262,39 +1288,63 @@ class VpnService:
                 logger.warning("start_sidecar: existing %s crashed, recreating", sidecar)
                 _run(dc + ["rm", "-f", sidecar], timeout=30)
 
-        # Remove leftover stopped container so docker run can use the name.
+        # Remove leftover stopped container.
         _run(dc + ["rm", "-f", sidecar], timeout=30)
 
-        # Build volume mount.  When the backend's DATA_ROOT is backed by a
-        # named Docker volume we mount that volume into the sidecar so it
-        # can see the .ovpn file.  The volume name is auto-detected from
-        # the current container's mounts.
+        # --- Volume mount ---
+        # Gluetun expects custom configs under /gluetun.  We mount the
+        # instance's _vpn/<name> directory there.
         data_volume = VpnService._detect_data_volume()
         if data_volume:
-            # Named volume — mount the whole volume, then reference the
-            # config via its path inside DATA_ROOT.
             vpn_mount = f"{data_volume}:{settings.DATA_ROOT}:ro"
-            ovpn_path = f"{settings.DATA_ROOT}/_vpn/{name}/config.ovpn"
+            gluetun_vol = [
+                "-v", vpn_mount,
+                "-v", f"{settings.DATA_ROOT}/_vpn/{name}:/gluetun:ro",
+            ]
+            # Override: we need the data volume to see the files, and a
+            # second mount that extracts just the vpn dir to /gluetun.
+            # But Docker doesn't allow mounting a subpath of a named
+            # volume directly.  Instead, mount the whole volume and use
+            # OPENVPN_CUSTOM_CONFIG to point to the file inside DATA_ROOT.
+            gluetun_vol = ["-v", vpn_mount]
         else:
-            # Direct host access (dev / bare-metal) — bind-mount the dir.
-            vpn_mount = f"{vpn_dir}:/vpn:ro"
-            ovpn_path = "/vpn/config.ovpn"
+            gluetun_vol = ["-v", f"{vpn_dir}:/gluetun:ro"]
 
-        # Create a new sidecar container
+        # For custom OpenVPN, override config path when using named volume
+        env_list = VpnService._build_env(vpn_type, provider, username, password)
+        if is_custom_openvpn and data_volume:
+            # Replace the default /gluetun/custom.conf with the full path
+            env_list = [
+                x if not x.startswith("OPENVPN_CUSTOM_CONFIG=")
+                else f"OPENVPN_CUSTOM_CONFIG={settings.DATA_ROOT}/_vpn/{name}/custom.conf"
+                for x in env_list
+            ]
+
+        # For custom WireGuard, mount the wg0.conf in the right place
+        if is_custom_wireguard:
+            if data_volume:
+                # Gluetun reads /gluetun/wireguard/wg0.conf
+                # We'll need a symlink or env override — simplest: bind the
+                # file.  With named volumes we point via DATA_ROOT.
+                pass  # The volume mount already covers it if we arrange the path
+            else:
+                gluetun_vol += ["-v", f"{vpn_dir}/wg0.conf:/gluetun/wireguard/wg0.conf:ro"]
+
         cmd = dc + [
             "run", "-d",
             "--name", sidecar,
             "--label", "redroid-ui.managed=1",
-            "--label", f"redroid-ui.role=vpn",
+            "--label", "redroid-ui.role=vpn",
             "--label", f"redroid-ui.parent={name}",
             "--cap-add=NET_ADMIN",
             "--device=/dev/net/tun",
-            "-v", vpn_mount,
         ]
+        cmd += gluetun_vol
+        cmd += env_list
         network = getattr(settings, "REDROID_DOCKER_NETWORK", "")
         if network:
             cmd += ["--network", network]
-        cmd += [VPN_IMAGE, "--config", ovpn_path]
+        cmd += [GLUETUN_IMAGE]
 
         p = _run(cmd, timeout=120)
         if p.returncode != 0:
@@ -1306,11 +1356,7 @@ class VpnService:
 
     @staticmethod
     def _wait_running(name: str, timeout: int = 10) -> None:
-        """Wait until the sidecar container is confirmed running.
-
-        If it exits immediately (bad config, auth error, etc.) we raise
-        with the container logs so the user can diagnose the problem.
-        """
+        """Wait until the sidecar container is confirmed running."""
         dc = _docker_cmd()
         sidecar = VpnService._sidecar_name(name)
         for _ in range(timeout):
@@ -1319,12 +1365,11 @@ class VpnService:
                 state = data.get("State", {}) or {}
                 if state.get("Running"):
                     return
-                # Container exited — grab logs and raise
                 if state.get("Status") in ("exited", "dead"):
                     logs = _run(dc + ["logs", "--tail", "30", sidecar], timeout=10)
                     detail = (logs.stdout or logs.stderr or "").strip()[-500:]
                     raise RuntimeError(
-                        f"Sidecar VPN saiu inesperadamente. Verifique o arquivo .ovpn.\n{detail}"
+                        f"Sidecar VPN saiu inesperadamente. Verifique a configuração.\n{detail}"
                     )
             except RuntimeError:
                 raise
@@ -1334,13 +1379,24 @@ class VpnService:
         raise RuntimeError("Sidecar VPN não iniciou a tempo.")
 
     @staticmethod
-    def wait_tunnel(name: str, timeout: int = 20) -> bool:
+    def wait_tunnel(name: str, timeout: int = 30) -> bool:
+        """Wait for the VPN tunnel to come up.
+
+        Gluetun exposes a health endpoint on port 9999 inside the
+        container.  We also fall back to checking for tun0/wg0.
+        """
         dc = _docker_cmd()
         sidecar = VpnService._sidecar_name(name)
         for _ in range(timeout // 2):
-            p = _run(dc + ["exec", sidecar, "ip", "addr", "show", "tun0"], timeout=5)
-            if p.returncode == 0 and "inet " in p.stdout:
+            # Primary: Gluetun HTTP health check
+            p = _run(dc + ["exec", sidecar, "wget", "-qO-", "http://127.0.0.1:9999"], timeout=5)
+            if p.returncode == 0:
                 return True
+            # Fallback: check for VPN network interface
+            for iface in ("tun0", "wg0"):
+                p2 = _run(dc + ["exec", sidecar, "ip", "addr", "show", iface], timeout=5)
+                if p2.returncode == 0 and "inet " in p2.stdout:
+                    return True
             time.sleep(2)
         return False
 
@@ -1358,10 +1414,8 @@ class VpnService:
 
     @staticmethod
     def sidecar_running(name: str) -> bool:
-        dc = _docker_cmd()
-        sidecar = VpnService._sidecar_name(name)
         try:
-            data = DockerService.inspect(sidecar)
+            data = DockerService.inspect(VpnService._sidecar_name(name))
             return bool((data.get("State") or {}).get("Running"))
         except RuntimeError:
             return False

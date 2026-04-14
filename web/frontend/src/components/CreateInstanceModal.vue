@@ -12,12 +12,29 @@ const useCustomImage = ref(false)
 const customImage = ref('')
 const availableImages = ref([])
 const vpnEnabled = ref(false)
+const vpnType = ref('openvpn')
+const vpnProvider = ref('custom')
 const vpnFile = ref(null)
 const vpnConfig = ref('')
 const vpnUsername = ref('')
 const vpnPassword = ref('')
 const error = ref('')
 const loading = ref(false)
+
+const vpnProviders = [
+  { value: 'custom', label: 'Custom (arquivo .ovpn / .conf)' },
+  { value: 'airvpn', label: 'AirVPN' },
+  { value: 'cyberghost', label: 'Cyberghost' },
+  { value: 'expressvpn', label: 'ExpressVPN' },
+  { value: 'fastestvpn', label: 'FastestVPN' },
+  { value: 'ivpn', label: 'IVPN' },
+  { value: 'mullvad', label: 'Mullvad (WireGuard)' },
+  { value: 'nordvpn', label: 'NordVPN' },
+  { value: 'private internet access', label: 'Private Internet Access' },
+  { value: 'protonvpn', label: 'ProtonVPN' },
+  { value: 'surfshark', label: 'Surfshark' },
+  { value: 'windscribe', label: 'Windscribe' },
+]
 
 const versions = [
   { value: 'redroid/redroid:14.0.0-latest', label: 'Android 14' },
@@ -47,9 +64,11 @@ async function handleSubmit() {
       image,
       gpu_mode: 'guest',
     }
-    if (vpnEnabled.value && vpnConfig.value) {
+    if (vpnEnabled.value) {
       payload.vpn_enabled = true
-      payload.vpn_config = vpnConfig.value
+      payload.vpn_type = vpnType.value
+      payload.vpn_provider = vpnProvider.value
+      if (vpnConfig.value) payload.vpn_config = vpnConfig.value
       if (vpnUsername.value) payload.vpn_username = vpnUsername.value
       if (vpnPassword.value) payload.vpn_password = vpnPassword.value
     }
@@ -125,23 +144,39 @@ onMounted(() => {
         <div class="form-group">
           <label class="label checkline">
             <input v-model="vpnEnabled" type="checkbox" />
-            Usar VPN (OpenVPN)
+            Usar VPN (via Gluetun)
           </label>
         </div>
 
         <template v-if="vpnEnabled">
           <div class="form-group">
-            <label class="label" for="inst-vpn-file">Arquivo .ovpn</label>
+            <label class="label" for="inst-vpn-provider">Provider</label>
+            <select id="inst-vpn-provider" v-model="vpnProvider" class="input">
+              <option v-for="p in vpnProviders" :key="p.value" :value="p.value">{{ p.label }}</option>
+            </select>
+          </div>
+
+          <div v-if="vpnProvider === 'custom'" class="form-group">
+            <label class="label" for="inst-vpn-type">Tipo VPN</label>
+            <select id="inst-vpn-type" v-model="vpnType" class="input">
+              <option value="openvpn">OpenVPN</option>
+              <option value="wireguard">WireGuard</option>
+            </select>
+          </div>
+
+          <div v-if="vpnProvider === 'custom'" class="form-group">
+            <label class="label" for="inst-vpn-file">Arquivo de configuração (.ovpn / .conf)</label>
             <input id="inst-vpn-file" ref="vpnFile" type="file" accept=".ovpn,.conf" class="input" @change="handleVpnFile" />
             <small v-if="vpnConfig" class="hint">Arquivo carregado ({{ vpnConfig.length }} bytes)</small>
           </div>
+
           <div class="form-group">
-            <label class="label" for="inst-vpn-user">Usuário VPN (opcional)</label>
-            <input id="inst-vpn-user" v-model="vpnUsername" class="input" placeholder="username" />
+            <label class="label" for="inst-vpn-user">{{ vpnType === 'wireguard' && vpnProvider === 'custom' ? 'Private Key' : 'Usuário VPN' }} (opcional)</label>
+            <input id="inst-vpn-user" v-model="vpnUsername" class="input" :placeholder="vpnType === 'wireguard' && vpnProvider === 'custom' ? 'wOEI9rqqbDwnN8/B...' : 'username'" />
           </div>
           <div class="form-group">
-            <label class="label" for="inst-vpn-pass">Senha VPN (opcional)</label>
-            <input id="inst-vpn-pass" v-model="vpnPassword" class="input" type="password" placeholder="password" />
+            <label class="label" for="inst-vpn-pass">{{ vpnType === 'wireguard' && vpnProvider === 'custom' ? 'Addresses (ex: 10.64.222.21/32)' : 'Senha VPN' }} (opcional)</label>
+            <input id="inst-vpn-pass" v-model="vpnPassword" class="input" :type="vpnType === 'wireguard' && vpnProvider === 'custom' ? 'text' : 'password'" :placeholder="vpnType === 'wireguard' && vpnProvider === 'custom' ? '10.64.222.21/32' : 'password'" />
           </div>
         </template>
 

@@ -150,7 +150,7 @@ async function handleApk(event) {
         {{ instance.status }}
       </span>
       <span v-if="instance.vpn_enabled" :class="['badge', instance.vpn_active ? 'badge--vpn-on' : 'badge--vpn-off']" :title="instance.vpn_active ? 'VPN conectada' : 'VPN desconectada'">
-        VPN
+        VPN{{ instance.vpn_type === 'wireguard' ? ' WG' : '' }}
       </span>
     </div>
 

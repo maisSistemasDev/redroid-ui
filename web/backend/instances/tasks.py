@@ -59,16 +59,19 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
         gpu_mode = payload.get("gpu_mode", "guest")
         extra_props = payload.get("extra_props", "")
         vpn_enabled = bool(payload.get("vpn_enabled", False))
+        vpn_type = payload.get("vpn_type", "openvpn")
+        vpn_provider = payload.get("vpn_provider", "custom")
         vpn_config = payload.get("vpn_config", "")
         vpn_username = payload.get("vpn_username", "")
         vpn_password = payload.get("vpn_password", "")
 
         # --- VPN sidecar setup (before creating the redroid container) ---
         if vpn_enabled:
-            if not vpn_config.strip():
-                raise RuntimeError("Conteúdo do arquivo .ovpn é obrigatório quando VPN está ativa.")
-            VpnService.store_config(name, vpn_config, vpn_username, vpn_password)
-            VpnService.start_sidecar(name)
+            if vpn_provider == "custom" and vpn_type == "openvpn" and not vpn_config.strip():
+                raise RuntimeError("Conteúdo do arquivo .ovpn é obrigatório quando VPN custom/OpenVPN está ativa.")
+            if vpn_config.strip():
+                VpnService.store_config(name, vpn_config, vpn_username, vpn_password)
+            VpnService.start_sidecar(name, vpn_type=vpn_type, provider=vpn_provider, username=vpn_username, password=vpn_password)
             if not VpnService.wait_tunnel(name, timeout=30):
                 logger.warning("create_instance_task: VPN tunnel not ready for %s, continuing anyway", name)
 
@@ -89,6 +92,8 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
             gpu_mode=gpu_mode,
             extra_props=extra_props,
             vpn_enabled=vpn_enabled,
+            vpn_type=vpn_type,
+            vpn_provider=vpn_provider,
             vpn_username=vpn_username,
             vpn_password=vpn_password,
         )
