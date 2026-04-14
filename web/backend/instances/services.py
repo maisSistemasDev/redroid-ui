@@ -1222,6 +1222,32 @@ class VpnService:
             resolved_lines.append(ln)
         ovpn_content = "\n".join(resolved_lines) + "\n"
 
+        # When inline blocks (<ca>, <cert>, <key>, <tls-auth>, <tls-crypt>)
+        # are present, remove the corresponding file-path directives
+        # (e.g. "ca openvpn-server-ca.crt") because the files don't exist
+        # inside the Gluetun container and would cause an error.
+        inline_tags = {"ca", "cert", "key", "tls-auth", "tls-crypt"}
+        found_inline = set()
+        for ln in ovpn_content.splitlines():
+            s = ln.strip()
+            for tag in inline_tags:
+                if s == f"<{tag}>":
+                    found_inline.add(tag)
+        if found_inline:
+            cleaned: list[str] = []
+            for ln in ovpn_content.splitlines():
+                s = ln.strip()
+                skip = False
+                for tag in found_inline:
+                    # Match "ca somefile.crt" but NOT "<ca>" or "</ca>"
+                    if s.startswith(tag + " ") and not s.startswith("<"):
+                        logger.info("VPN store_config: removing redundant directive: %s", s)
+                        skip = True
+                        break
+                if not skip:
+                    cleaned.append(ln)
+            ovpn_content = "\n".join(cleaned) + "\n"
+
         config_path = vpn_dir / "custom.conf"
         config_path.write_text(ovpn_content, encoding="utf-8")
 
