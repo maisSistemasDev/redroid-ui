@@ -241,6 +241,7 @@ class InputConsumer(AsyncWebsocketConsumer):
     keyboard_dev = None
     tracking_id = 0
     fallback_touch_mode = False
+    force_fallback_mode = False
     fallback_down_xy: tuple[int, int] | None = None
     fallback_last_xy: tuple[int, int] | None = None
     # Deferred tap: buffer "down" and only commit the injection method on
@@ -268,7 +269,8 @@ class InputConsumer(AsyncWebsocketConsumer):
 
         self.serial = instance.serial
         self.dev = "/dev/input/event18"
-        self.fallback_touch_mode = bool(instance.vpn_enabled)
+        self.force_fallback_mode = bool(instance.vpn_enabled)
+        self.fallback_touch_mode = self.force_fallback_mode
         try:
             retries = 18 if instance.vpn_enabled else 6
             await asyncio.to_thread(AdbService.connect, self.serial, retries, 5)
@@ -464,7 +466,8 @@ class InputConsumer(AsyncWebsocketConsumer):
             self._had_move = False
             self.fallback_down_xy = None
             self.fallback_last_xy = None
-            self.fallback_touch_mode = False
+            # Keep forced fallback for VPN/Tor sessions.
+            self.fallback_touch_mode = self.force_fallback_mode
 
         elif evt_type == "scroll":
             ax, ay = clamp_coords(data["x"], data["y"])
