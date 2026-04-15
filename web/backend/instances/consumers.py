@@ -174,7 +174,10 @@ class ScreenConsumer(AsyncWebsocketConsumer):
         adb_interval = 5
         boot_timeout = 90 if instance.vpn_enabled else 15
         try:
-            await asyncio.to_thread(AdbService.connect, serial, adb_retries, adb_interval)
+            await asyncio.wait_for(
+                asyncio.to_thread(AdbService.connect, serial, adb_retries, adb_interval),
+                timeout=20,
+            )
             booted = await asyncio.wait_for(
                 asyncio.to_thread(AdbService.wait_boot, serial, boot_timeout), timeout=boot_timeout + 10
             )
@@ -252,6 +255,16 @@ class InputConsumer(AsyncWebsocketConsumer):
     _pending_down: tuple[int, int] | None = None
     _had_move: bool = False
 
+    async def _send_input_cmd(self, cmd: str, timeout: int = 6) -> bool:
+        """Try root input command first; fallback to adb shell on failure."""
+        ok = await asyncio.to_thread(cmd_send_root, self.serial, cmd, timeout)
+        if ok:
+            return True
+        ok = await asyncio.to_thread(cmd_send_direct, self.serial, cmd, timeout)
+        if not ok:
+            logger.warning("InputConsumer: input command failed for %s: %s", self.serial, cmd)
+        return ok
+
     async def connect(self):
         self.instance_id = self.scope["url_route"]["kwargs"]["instance_id"]
         auth = _validate_ws_token(self.scope.get("query_string", b""))
@@ -273,7 +286,10 @@ class InputConsumer(AsyncWebsocketConsumer):
         self.fallback_touch_mode = self.force_fallback_mode
         try:
             retries = 18 if instance.vpn_enabled else 6
-            await asyncio.to_thread(AdbService.connect, self.serial, retries, 5)
+            await asyncio.wait_for(
+                asyncio.to_thread(AdbService.connect, self.serial, retries, 5),
+                timeout=20,
+            )
         except (asyncio.TimeoutError, Exception) as e:
             logger.warning("InputConsumer: ADB connect failed for %s: %s", self.serial, e)
             if not self.fallback_touch_mode:
@@ -304,14 +320,19 @@ class InputConsumer(AsyncWebsocketConsumer):
                 self.fallback_touch_mode = True
 
         # Also detect keyboard device (not critical if it fails)
-        try:
-            self.keyboard_dev = await asyncio.wait_for(
-                asyncio.to_thread(AdbService.detect_keyboard_device, self.serial), timeout=10
-            )
-            logger.info("InputConsumer: detected keyboard device %s for %s", self.keyboard_dev, self.serial)
-        except Exception as e:
-            logger.warning("InputConsumer: keyboard device detection failed for %s: %s", self.serial, e)
+        if self.force_fallback_mode:
+            # In VPN/Tor mode we use ADB input path; keyboard device probing is unnecessary
+            # and can hold websocket shutdown while adb/device is unstable.
             self.keyboard_dev = None
+        else:
+            try:
+                self.keyboard_dev = await asyncio.wait_for(
+                    asyncio.to_thread(AdbService.detect_keyboard_device, self.serial), timeout=10
+                )
+                logger.info("InputConsumer: detected keyboard device %s for %s", self.keyboard_dev, self.serial)
+            except Exception as e:
+                logger.warning("InputConsumer: keyboard device detection failed for %s: %s", self.serial, e)
+                self.keyboard_dev = None
 
     async def receive(self, text_data=None, bytes_data=None):
         if not text_data or not self.serial:
@@ -432,7 +453,7 @@ class InputConsumer(AsyncWebsocketConsumer):
                             # Fallback to input tap if native injection fails
                             logger.warning("tap: native inject failed, falling back to input tap command at (%d, %d)", ex, ey)
                             await asyncio.sleep(0.1)
-                        ok = await asyncio.to_thread(cmd_send_root, self.serial, f"input tap {ex} {ey}")
+                        ok = await self._send_input_cmd(f"input tap {ex} {ey}")
                         if ok:
                             logger.info("tap: input tap succeeded at (%d, %d)", ex, ey)
                         else:
@@ -440,10 +461,7 @@ class InputConsumer(AsyncWebsocketConsumer):
                     else:
                         # Swipe
                         logger.info("swipe: detected movement from (%d, %d) to (%d, %d)", sx, sy, ex, ey)
-                        await asyncio.to_thread(
-                            cmd_send_root, self.serial,
-                            f"input swipe {sx} {sy} {ex} {ey} 120",
-                        )
+                        await self._send_input_cmd(f"input swipe {sx} {sy} {ex} {ey} 120")
             else:
                 # ── DRAG path: had movement, complete native sequence ──
                 ok = await asyncio.to_thread(inject_events, self.serial, self.dev, [
@@ -474,7 +492,7 @@ class InputConsumer(AsyncWebsocketConsumer):
             scroll_down = data.get("dir") == "down"
             if FORCE_ADB_INPUT or self.fallback_touch_mode:
                 end_y = max(0, min(1279, ay + (420 if scroll_down else -420)))
-                await asyncio.to_thread(cmd_send_root, self.serial, f"input swipe {ax} {ay} {ax} {end_y} 140")
+                await self._send_input_cmd(f"input swipe {ax} {ay} {ax} {end_y} 140")
                 return
             step = 80
             dist = step if scroll_down else -step
@@ -509,19 +527,16 @@ class InputConsumer(AsyncWebsocketConsumer):
             if ok:
                 return
             end_y = max(0, min(1279, ay + (420 if scroll_down else -420)))
-            await asyncio.to_thread(cmd_send_root, self.serial, f"input swipe {ax} {ay} {ax} {end_y} 140")
+            await self._send_input_cmd(f"input swipe {ax} {ay} {ax} {end_y} 140")
         elif evt_type == "key":
             kc = int(data.get("keycode", 0))
             if kc:
-                await asyncio.to_thread(cmd_send_root, self.serial, f"input keyevent {kc}")
+                await self._send_input_cmd(f"input keyevent {kc}")
         elif evt_type == "keycombo":
             modifier = int(data.get("modifier", 0))
             kc = int(data.get("keycode", 0))
             if modifier and kc:
-                await asyncio.to_thread(
-                    cmd_send_root, self.serial,
-                    f"input keycombination {modifier} {kc}",
-                )
+                await self._send_input_cmd(f"input keycombination {modifier} {kc}")
         elif evt_type == "text":
             txt = data.get("text", "")
             if txt:
@@ -554,7 +569,7 @@ class InputConsumer(AsyncWebsocketConsumer):
                 else:
                     # Fallback to input text command if keyboard device not available
                     logger.info("text: using input text command for '%s'", txt)
-                    ok = await asyncio.to_thread(cmd_send_root, self.serial, f"input text {shlex.quote(txt)}")
+                    ok = await self._send_input_cmd(f"input text {shlex.quote(txt)}")
                     if not ok:
                         logger.error("text: input text command failed for '%s' on %s", txt, self.serial)
 
