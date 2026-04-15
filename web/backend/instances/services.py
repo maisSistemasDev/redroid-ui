@@ -1236,34 +1236,27 @@ nc -z 127.0.0.1 9050 2>/dev/null || { echo "Tor bootstrap timed out" >&2; exit 1
 sleep 3
 
 echo "Applying transparent proxy rules..."
-
-cat > /tmp/redsocks.conf << 'RCEOF'
-base {
-  log_debug = off;
-  log_info = on;
-  log = stderr;
-  daemon = off;
-  redirector = iptables;
-}
-redsocks {
-  local_ip = 127.0.0.1;
-  local_port = 12345;
-  ip = 127.0.0.1;
-  port = 9050;
-  type = socks5;
-}
-RCEOF
-
-redsocks -c /tmp/redsocks.conf &
-sleep 1
-
 iptables -t nat -F OUTPUT 2>/dev/null || true
 iptables -t nat -A OUTPUT -d 127.0.0.0/8  -j RETURN
 iptables -t nat -A OUTPUT -d 10.0.0.0/8   -j RETURN
 iptables -t nat -A OUTPUT -d 172.16.0.0/12 -j RETURN
 iptables -t nat -A OUTPUT -d 192.168.0.0/16 -j RETURN
-iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-ports 12345
-iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 5353
+
+# Prevent Tor's own outbound traffic from being intercepted.
+iptables -t nat -A OUTPUT -m owner --uid-owner tor -j RETURN 2>/dev/null \
+    || iptables -t nat -A OUTPUT -m owner --uid-owner 100 -j RETURN 2>/dev/null \
+    || true
+
+# Prefer REDIRECT; fallback to DNAT on kernels without REDIRECT support.
+if ! iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-ports 9040 2>/dev/null; then
+    echo "REDIRECT not available for TCP, falling back to DNAT 127.0.0.1:9040"
+    iptables -t nat -A OUTPUT -p tcp -j DNAT --to-destination 127.0.0.1:9040
+fi
+
+if ! iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null; then
+    echo "REDIRECT not available for DNS, falling back to DNAT 127.0.0.1:5353"
+    iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination 127.0.0.1:5353
+fi
 
 echo "Tor transparent proxy active. country=${COUNTRY:-any}"
 wait $TOR_PID
@@ -1715,8 +1708,8 @@ class VpnService:
         """Wait for the VPN tunnel to be ready.
 
         - openvpn: check for tun0 interface with an inet address.
-        - tor: check that the SOCKS5 port (9050) is open AND iptables
-          REDIRECT rule is applied (signals bootstrap + proxy active).
+                - tor: check that the SOCKS5 port (9050) is open AND iptables
+                    has a TCP redirect rule (REDIRECT or DNAT).
         """
         dc = _docker_cmd()
         sidecar = VpnService._sidecar_name(name)
@@ -1725,12 +1718,13 @@ class VpnService:
                 # SOCKS5 open = bootstrap complete
                 p = _run(dc + ["exec", sidecar, "nc", "-z", "127.0.0.1", "9050"], timeout=5)
                 if p.returncode == 0:
-                    # Also verify redsocks iptables rule is applied
+                    # Also verify transparent TCP interception rule is applied
                     p2 = _run(
                         dc + ["exec", sidecar, "iptables", "-t", "nat", "-L", "OUTPUT", "-n"],
                         timeout=5,
                     )
-                    if "REDIRECT" in (p2.stdout or ""):
+                    out = p2.stdout or ""
+                    if ("REDIRECT" in out or "DNAT" in out) and ("tcp" in out.lower()):
                         return True
             else:
                 p = _run(dc + ["exec", sidecar, "ip", "addr", "show", "tun0"], timeout=5)
