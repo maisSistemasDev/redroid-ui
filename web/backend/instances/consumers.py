@@ -170,15 +170,16 @@ class ScreenConsumer(AsyncWebsocketConsumer):
         await self.accept()
 
         serial = instance.serial
+        adb_retries = 18 if instance.vpn_enabled else 6
+        adb_interval = 5
+        boot_timeout = 90 if instance.vpn_enabled else 15
         try:
-            await asyncio.to_thread(AdbService.connect, serial)
+            await asyncio.to_thread(AdbService.connect, serial, adb_retries, adb_interval)
             booted = await asyncio.wait_for(
-                asyncio.to_thread(AdbService.wait_boot, serial, 15), timeout=20
+                asyncio.to_thread(AdbService.wait_boot, serial, boot_timeout), timeout=boot_timeout + 10
             )
             if not booted:
-                await self.send(bytes_data=b"")
-                await self.close(code=4001)
-                return
+                logger.warning("ScreenConsumer: boot not completed yet for %s", serial)
             # Dismiss system overlays that block touch in security-sensitive
             # apps like WhatsApp (filterTouchesWhenObscured).
             await asyncio.to_thread(AdbService.dismiss_overlays, serial)
@@ -269,11 +270,17 @@ class InputConsumer(AsyncWebsocketConsumer):
         self.dev = "/dev/input/event18"
         self.fallback_touch_mode = bool(instance.vpn_enabled)
         try:
-            await asyncio.to_thread(AdbService.connect, self.serial)
+            retries = 18 if instance.vpn_enabled else 6
+            await asyncio.to_thread(AdbService.connect, self.serial, retries, 5)
         except (asyncio.TimeoutError, Exception) as e:
             logger.warning("InputConsumer: ADB connect failed for %s: %s", self.serial, e)
-            await self.close(code=4002)
-            return
+            if not self.fallback_touch_mode:
+                await self.close(code=4002)
+                return
+            logger.warning(
+                "InputConsumer: keeping socket open in VPN fallback mode for %s despite ADB delay",
+                self.serial,
+            )
 
         if self.fallback_touch_mode:
             logger.info(

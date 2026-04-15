@@ -1739,6 +1739,36 @@ class VpnService:
         raise RuntimeError("Sidecar VPN não iniciou a tempo.")
 
     @staticmethod
+    def _tunnel_ready_once(name: str, vpn_type: str = "openvpn") -> bool:
+        """Single non-blocking tunnel readiness probe."""
+        dc = _docker_cmd()
+        sidecar = VpnService._sidecar_name(name)
+
+        if vpn_type == "tor":
+            p = _run(dc + ["exec", sidecar, "nc", "-z", "127.0.0.1", "9050"], timeout=5)
+            if p.returncode != 0:
+                return False
+            p2 = _run(
+                dc + ["exec", sidecar, "iptables", "-t", "nat", "-L", "OUTPUT", "-n"],
+                timeout=5,
+            )
+            out = p2.stdout or ""
+            return ("REDIRECT" in out or "DNAT" in out) and ("tcp" in out.lower())
+
+        p = _run(dc + ["exec", sidecar, "ip", "addr", "show", "tun0"], timeout=5)
+        return p.returncode == 0 and "inet " in (p.stdout or "")
+
+    @staticmethod
+    def connection_status(name: str, vpn_type: str = "openvpn") -> str:
+        """Return VPN sidecar status: connected, starting, disconnected or unknown."""
+        if not VpnService.sidecar_running(name):
+            return "disconnected"
+        try:
+            return "connected" if VpnService._tunnel_ready_once(name, vpn_type=vpn_type) else "starting"
+        except Exception:
+            return "unknown"
+
+    @staticmethod
     def wait_tunnel(name: str, timeout: int = 30, vpn_type: str = "openvpn") -> bool:
         """Wait for the VPN tunnel to be ready.
 
@@ -1747,24 +1777,9 @@ class VpnService:
                     has a TCP redirect rule (REDIRECT or DNAT).
         """
         dc = _docker_cmd()
-        sidecar = VpnService._sidecar_name(name)
         for _ in range(max(1, timeout // 2)):
-            if vpn_type == "tor":
-                # SOCKS5 open = bootstrap complete
-                p = _run(dc + ["exec", sidecar, "nc", "-z", "127.0.0.1", "9050"], timeout=5)
-                if p.returncode == 0:
-                    # Also verify transparent TCP interception rule is applied
-                    p2 = _run(
-                        dc + ["exec", sidecar, "iptables", "-t", "nat", "-L", "OUTPUT", "-n"],
-                        timeout=5,
-                    )
-                    out = p2.stdout or ""
-                    if ("REDIRECT" in out or "DNAT" in out) and ("tcp" in out.lower()):
-                        return True
-            else:
-                p = _run(dc + ["exec", sidecar, "ip", "addr", "show", "tun0"], timeout=5)
-                if p.returncode == 0 and "inet " in (p.stdout or ""):
-                    return True
+            if VpnService._tunnel_ready_once(name, vpn_type=vpn_type):
+                return True
             time.sleep(2)
         return False
 

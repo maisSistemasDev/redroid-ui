@@ -45,6 +45,16 @@ def _instance_payload(instance: Instance) -> dict:
         data["connection_status"] = AdbService.connection_status(instance.serial)
     except Exception:
         data["connection_status"] = "unknown"
+    if instance.vpn_enabled:
+        try:
+            data["vpn_connection_status"] = VpnService.connection_status(
+                instance.name,
+                vpn_type=instance.vpn_type,
+            )
+        except Exception:
+            data["vpn_connection_status"] = "unknown"
+    else:
+        data["vpn_connection_status"] = "disabled"
     return data
 
 
