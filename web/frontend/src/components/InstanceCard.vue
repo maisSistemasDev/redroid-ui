@@ -15,6 +15,22 @@ const actionLoading = ref('')
 const apkInput = ref(null)
 const videoEl = ref(null)
 
+const connectionLabel = computed(() => {
+  const s = (props.instance.connection_status || 'unknown').toLowerCase()
+  if (s === 'connected') return 'ADB OK'
+  if (s === 'offline') return 'ADB OFFLINE'
+  if (s === 'unauthorized') return 'ADB AUTH'
+  if (s === 'disconnected') return 'ADB DOWN'
+  return 'ADB ?'
+})
+
+const connectionBadgeClass = computed(() => {
+  const s = (props.instance.connection_status || 'unknown').toLowerCase()
+  if (s === 'connected') return 'badge--conn-up'
+  if (s === 'offline' || s === 'unauthorized') return 'badge--conn-warn'
+  return 'badge--conn-down'
+})
+
 let jmuxerInstance = null
 let screenWs = null
 let reconnectTimer = null
@@ -149,6 +165,9 @@ async function handleApk(event) {
       <span :class="['badge', instance.running ? 'badge--running' : 'badge--stopped']">
         {{ instance.status }}
       </span>
+      <span :class="['badge', connectionBadgeClass]" :title="`Conexão ADB: ${instance.connection_status || 'unknown'}`">
+        {{ connectionLabel }}
+      </span>
       <span v-if="instance.vpn_enabled" :class="['badge', instance.vpn_active ? 'badge--vpn-on' : 'badge--vpn-off']" :title="instance.vpn_active ? 'VPN conectada' : 'VPN desconectada'">
         VPN{{ instance.vpn_type === 'wireguard' ? ' WG' : '' }}
       </span>
@@ -258,4 +277,7 @@ async function handleApk(event) {
 
 .badge--vpn-on { background: #1e7a3a; color: #fff; }
 .badge--vpn-off { background: #6b4400; color: #fff; }
+.badge--conn-up { background: #0f7a43; color: #fff; }
+.badge--conn-warn { background: #8a5a00; color: #fff; }
+.badge--conn-down { background: #6b2a2a; color: #fff; }
 </style>

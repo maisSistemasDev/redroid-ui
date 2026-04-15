@@ -41,6 +41,10 @@ def _instance_payload(instance: Instance) -> dict:
     except Exception:
         data["running"] = False
         data["status"] = "unknown"
+    try:
+        data["connection_status"] = AdbService.connection_status(instance.serial)
+    except Exception:
+        data["connection_status"] = "unknown"
     return data
 
 
@@ -110,9 +114,16 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
             vpn_country=vpn_country,
         )
         TouchService.setup_virtual_touch(name)
-        AdbService.connect(instance.serial)
-        if AdbService.wait_boot(instance.serial, 30):
-            AdbService.dismiss_overlays(instance.serial)
+        try:
+            AdbService.connect(instance.serial)
+            if AdbService.wait_boot(instance.serial, 30):
+                AdbService.dismiss_overlays(instance.serial)
+        except Exception as e:
+            logger.warning(
+                "create_instance_task: instance %s created but ADB is not ready yet (%s)",
+                name,
+                e,
+            )
         instance_data = _instance_payload(instance)
         _publish_job(
             user_id,

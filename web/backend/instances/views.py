@@ -51,6 +51,10 @@ class InstanceViewSet(viewsets.ModelViewSet):
         except Exception:
             data["running"] = False
             data["status"] = "unknown"
+        try:
+            data["connection_status"] = AdbService.connection_status(instance.serial)
+        except Exception:
+            data["connection_status"] = "unknown"
         if instance.vpn_enabled:
             data["vpn_active"] = VpnService.sidecar_running(instance.name)
         else:
@@ -152,9 +156,16 @@ class InstanceViewSet(viewsets.ModelViewSet):
             DockerService.start(instance.name)
             TouchService.setup_virtual_touch(instance.name)
             TouchService.setup_virtual_keyboard(instance.name)
-            AdbService.connect(instance.serial)
-            if AdbService.wait_boot(instance.serial, 15):
-                AdbService.dismiss_overlays(instance.serial)
+            try:
+                AdbService.connect(instance.serial)
+                if AdbService.wait_boot(instance.serial, 15):
+                    AdbService.dismiss_overlays(instance.serial)
+            except Exception as e:
+                logger.warning(
+                    "start: instance %s started but ADB is not ready yet (%s)",
+                    instance.name,
+                    e,
+                )
         except RuntimeError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(self._enrich(instance))

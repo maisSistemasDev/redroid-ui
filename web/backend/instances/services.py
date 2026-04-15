@@ -306,6 +306,31 @@ def _short(msg: str, limit: int = 400) -> str:
 
 class AdbService:
     @staticmethod
+    def connection_status(serial: str) -> str:
+        """Return ADB connection status for a serial.
+
+        Possible values: connected, offline, unauthorized, disconnected, unknown.
+        """
+        try:
+            p = _run(["adb", "devices"], timeout=10)
+        except Exception:
+            return "unknown"
+
+        if p.returncode != 0:
+            return "unknown"
+
+        for ln in (p.stdout or "").splitlines():
+            line = ln.strip()
+            if not line.startswith(serial + "\t"):
+                continue
+            state = line.split("\t", 1)[1].strip().lower()
+            if state in {"device", "offline", "unauthorized"}:
+                return "connected" if state == "device" else state
+            return "unknown"
+
+        return "disconnected"
+
+    @staticmethod
     def connect(serial: str, retries: int = 6, interval: int = 5) -> None:
         """Connect ADB to the given serial, retrying on timeout.
 
@@ -1219,7 +1244,9 @@ printf '%s\\n' \\
     'Log notice stderr' > /etc/tor/torrc
 
 if [ -n "$COUNTRY" ]; then
-    printf 'ExitNodes {%s}\\nStrictNodes 1\\n' "$COUNTRY" >> /etc/tor/torrc
+    # Best-effort country preference: avoids total egress lock when no exits
+    # are currently available for the selected country.
+    printf 'ExitNodes {%s}\\nStrictNodes 0\\n' "$COUNTRY" >> /etc/tor/torrc
 fi
 
 tor -f /etc/tor/torrc &
@@ -1241,6 +1268,14 @@ iptables -t nat -A OUTPUT -d 127.0.0.0/8  -j RETURN
 iptables -t nat -A OUTPUT -d 10.0.0.0/8   -j RETURN
 iptables -t nat -A OUTPUT -d 172.16.0.0/12 -j RETURN
 iptables -t nat -A OUTPUT -d 192.168.0.0/16 -j RETURN
+
+# Exclude all directly connected local subnets as seen inside this network
+# namespace. This preserves control-plane traffic (ADB/API/docker overlay)
+# even when Docker network ranges are non-RFC1918.
+for cidr in $(ip -o -4 route show scope link | awk '{print $1}' | sort -u); do
+    [ -n "$cidr" ] || continue
+    iptables -t nat -A OUTPUT -d "$cidr" -j RETURN 2>/dev/null || true
+done
 
 # Prevent Tor's own outbound traffic from being intercepted.
 iptables -t nat -A OUTPUT -m owner --uid-owner tor -j RETURN 2>/dev/null \
