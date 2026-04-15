@@ -6,6 +6,8 @@ import logging
 import os
 import shlex
 
+from django.conf import settings
+
 from channels.generic.websocket import AsyncWebsocketConsumer
 from rest_framework_simplejwt.tokens import AccessToken
 
@@ -22,6 +24,8 @@ from .services import (
     clamp_coords,
     inject_events, inject_keyboard_events, cmd_send, cmd_send_direct, cmd_send_best_effort,
     cmd_send_root,
+    _serial_container_name,
+    _docker_cmd,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,11 +177,13 @@ class ScreenConsumer(AsyncWebsocketConsumer):
         adb_retries = 18 if instance.vpn_enabled else 6
         adb_interval = 5
         boot_timeout = 90 if instance.vpn_enabled else 15
+        adb_ready = False
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(AdbService.connect, serial, adb_retries, adb_interval),
                 timeout=20,
             )
+            adb_ready = True
             booted = await asyncio.wait_for(
                 asyncio.to_thread(AdbService.wait_boot, serial, boot_timeout), timeout=boot_timeout + 10
             )
@@ -188,17 +194,34 @@ class ScreenConsumer(AsyncWebsocketConsumer):
             await asyncio.to_thread(AdbService.dismiss_overlays, serial)
         except (asyncio.TimeoutError, Exception) as e:
             logger.warning("ScreenConsumer: ADB connect failed for %s: %s", serial, e)
-            await self.close(code=4002)
-            return
+            adb_ready = False
 
         try:
-            self.proc = await asyncio.create_subprocess_exec(
-                "adb", "-s", serial, "exec-out",
-                "screenrecord", "--output-format=h264",
-                "--size", STREAM_SIZE, "--bit-rate", STREAM_BITRATE, "-",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
+            if adb_ready:
+                self.proc = await asyncio.create_subprocess_exec(
+                    "adb", "-s", serial, "exec-out",
+                    "screenrecord", "--output-format=h264",
+                    "--size", STREAM_SIZE, "--bit-rate", STREAM_BITRATE, "-",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            else:
+                cname = _serial_container_name(serial)
+                if not cname:
+                    await self.close(code=4002)
+                    return
+                dc = _docker_cmd()
+                cmd = dc + [
+                    "exec", cname,
+                    "sh", "-c",
+                    f"screenrecord --output-format=h264 --size {STREAM_SIZE} --bit-rate {STREAM_BITRATE} -",
+                ]
+                self.proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                logger.info("ScreenConsumer: using docker-exec stream fallback for %s", serial)
         except Exception as e:
             logger.warning("ScreenConsumer: screenrecord failed for %s: %s", serial, e)
             await self.close(code=4003)
@@ -284,19 +307,20 @@ class InputConsumer(AsyncWebsocketConsumer):
         self.dev = "/dev/input/event18"
         self.force_fallback_mode = bool(instance.vpn_enabled)
         self.fallback_touch_mode = self.force_fallback_mode
-        try:
-            retries = 18 if instance.vpn_enabled else 6
-            await asyncio.wait_for(
-                asyncio.to_thread(AdbService.connect, self.serial, retries, 5),
-                timeout=20,
-            )
-        except (asyncio.TimeoutError, Exception) as e:
-            logger.warning("InputConsumer: ADB connect failed for %s: %s", self.serial, e)
-            if not self.fallback_touch_mode:
+        if not self.force_fallback_mode:
+            try:
+                retries = 6
+                await asyncio.wait_for(
+                    asyncio.to_thread(AdbService.connect, self.serial, retries, 5),
+                    timeout=20,
+                )
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning("InputConsumer: ADB connect failed for %s: %s", self.serial, e)
                 await self.close(code=4002)
                 return
-            logger.warning(
-                "InputConsumer: keeping socket open in VPN fallback mode for %s despite ADB delay",
+        else:
+            logger.info(
+                "InputConsumer: VPN/Tor mode for %s; skipping ADB connect and using docker-exec fallback path",
                 self.serial,
             )
 
