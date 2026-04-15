@@ -238,6 +238,7 @@ onMounted(() => {
               <input id="inst-vpn-pass" v-model="vpnPassword" class="input" type="password" placeholder="password" />
             </div>
           </template>
+        </template>
 
         <div class="form-actions">
           <button type="button" class="btn" @click="emit('close')">Cancelar</button>

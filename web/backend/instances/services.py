@@ -1207,13 +1207,15 @@ set -e
 COUNTRY="${TOR_COUNTRY:-}"
 
 mkdir -p /var/lib/tor /run/tor
-chmod 700 /var/lib/tor
+chown -R tor:tor /var/lib/tor /run/tor
+chmod 700 /var/lib/tor /run/tor
 
 printf '%s\\n' \\
     'SocksPort 127.0.0.1:9050' \\
     'TransPort 127.0.0.1:9040' \\
     'DNSPort 127.0.0.1:5353' \\
     'DataDirectory /var/lib/tor' \\
+    'User tor' \\
     'Log notice stderr' > /etc/tor/torrc
 
 if [ -n "$COUNTRY" ]; then
