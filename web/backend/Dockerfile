@@ -14,14 +14,15 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ .
-COPY redroid-script /opt/redroid-ui/redroid-script
-COPY tools /opt/redroid-ui/tools
+COPY redroid-script /opt/virtuale/redroid-script
+COPY tools /opt/virtuale/tools
 
-RUN pip install --no-cache-dir -r /opt/redroid-ui/redroid-script/requirements.txt
+RUN pip install --no-cache-dir -r /opt/virtuale/redroid-script/requirements.txt
 
-RUN gcc -O2 -static -o /opt/redroid-ui/tools/create_touch /opt/redroid-ui/tools/create_touch.c && \
-    gcc -O2 -static -o /opt/redroid-ui/tools/touch_inject /opt/redroid-ui/tools/touch_inject.c && \
-    gcc -O2 -static -o /opt/redroid-ui/tools/init_wrapper /opt/redroid-ui/tools/init_wrapper.c
+RUN gcc -O2 -static -o /opt/virtuale/tools/create_touch /opt/virtuale/tools/create_touch.c && \
+    gcc -O2 -static -o /opt/virtuale/tools/create_keyboard /opt/virtuale/tools/create_keyboard.c && \
+    gcc -O2 -static -o /opt/virtuale/tools/touch_inject /opt/virtuale/tools/touch_inject.c && \
+    gcc -O2 -static -o /opt/virtuale/tools/init_wrapper /opt/virtuale/tools/init_wrapper.c
 
 RUN python manage.py collectstatic --noinput 2>/dev/null || true
 

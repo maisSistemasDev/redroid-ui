@@ -1,34 +1,34 @@
-# Configuração do Portainer para ReDroid Cloud com Virtual Keyboard
+# Configuração do Portainer para Virtuale Cloud com Virtual Keyboard
 
 ## Mudanças Feitas
 
-No `docker-compose.yml` da stack ReDroid Cloud, foram adicionadas volume mounts para `/opt/redroid-ui/tools`:
+No `docker-compose.yml` da stack Virtuale Cloud, foram adicionadas volume mounts para `/opt/virtuale/tools`:
 
 ### 1. Volume Mount para API
 ```yaml
 api:
   volumes:
-    - /home/daniel/Documentos/Projetos/redroid-ui/web/tools:/opt/redroid-ui/tools:ro
+    - /home/daniel/Documentos/Projetos/redroid-ui/web/tools:/opt/virtuale/tools:ro
 ```
 
 ### 2. Volume Mount para Worker
 ```yaml
 worker:
   volumes:
-    - /home/daniel/Documentos/Projetos/redroid-ui/web/tools:/opt/redroid-ui/tools:ro
+    - /home/daniel/Documentos/Projetos/redroid-ui/web/tools:/opt/virtuale/tools:ro
 ```
 
-Ambos apontam para o mesmo diretório local `/home/daniel/Documentos/Projetos/redroid-ui/web/tools` no container como `/opt/redroid-ui/tools` (somente leitura).
+Ambos apontam para o mesmo diretório local `/home/daniel/Documentos/Projetos/redroid-ui/web/tools` no container como `/opt/virtuale/tools` (somente leitura).
 
 ### 3. Variável de Ambiente TOOLS_DIR
-O `TOOLS_DIR` já estava configurado como `/opt/redroid-ui/tools` na stack, portanto não há mudanças necessárias ali.
+O `TOOLS_DIR` já estava configurado como `/opt/virtuale/tools` na stack, portanto não há mudanças necessárias ali.
 
 ## Como Aplicar no Portainer
 
 ### Opção A: Via Stack YAML (Recomendado)
 
 1. No Portainer, vá para **Stacks**
-2. Selecione sua stack `redroid-cloud`
+2. Selecione sua stack `virtuale`
 3. Clique em **Editor**
 4. Substitua o conteúdo com o arquivo `docker-compose.portainer.yml` (atualizado)
 5. Clique em **Update the stack**
@@ -36,13 +36,12 @@ O `TOOLS_DIR` já estava configurado como `/opt/redroid-ui/tools` na stack, port
 
 ### Opção B: Editar Manualmente via Interface Web
 
-1. No Portainer, abra a stack `redroid-cloud`
+1. No Portainer, abra a stack `virtuale`
 2. Clique em **Edit** → **Editor**
 3. Na seção `api`, procure por `volumes:` e adicione:
 
 ```yaml
-      # Mount tools directory for virtual keyboard/touch binaries
-      - /home/daniel/Documentos/Projetos/redroid-ui/web/tools:/opt/redroid-ui/tools:ro
+      - /home/daniel/Documentos/Projetos/redroid-ui/web/tools:/opt/virtuale/tools:ro
 ```
 
 4. Faça o mesmo na seção `worker`
@@ -56,8 +55,8 @@ Após atualizar, execute em um terminal:
 # 1. Verificar se o API está rodando
 docker ps | grep virtuale-be
 
-# 2. Verificar se /opt/redroid-ui/tools está montado com os binários
-docker exec virtuale-be ls -lh /opt/redroid-ui/tools/
+# 2. Verificar se /opt/virtuale/tools está montado com os binários
+docker exec virtuale-be ls -lh /opt/virtuale/tools/
 
 # Deve listar:
 # -rwxr-xr-x create_keyboard
@@ -65,7 +64,7 @@ docker exec virtuale-be ls -lh /opt/redroid-ui/tools/
 # -rwxr-xr-x touch_inject
 
 # 3. Verificar se o Worker também tem acesso
-docker exec virtuale-worker ls -lh /opt/redroid-ui/tools/
+docker exec virtuale-worker ls -lh /opt/virtuale/tools/
 ```
 
 ## Teste Completo
@@ -86,10 +85,10 @@ docker exec virtuale-worker ls -lh /opt/redroid-ui/tools/
    ```
 
 3. **Procure nos logs por:**
-   - ✅ `setup_virtual_keyboard: deploying create_keyboard binary`
-   - ✅ `setup_virtual_keyboard: create_keyboard daemon started`
-   - ✅ `setup_virtual_keyboard: keyboard device node verified`
-   - ✅ `detected keyboard device /dev/input/eventN`
+   - `setup_virtual_keyboard: deploying create_keyboard binary`
+   - `setup_virtual_keyboard: create_keyboard daemon started`
+   - `setup_virtual_keyboard: keyboard device node verified`
+   - `detected keyboard device /dev/input/eventN`
 
 4. **No viewer, teste typing** em um campo de texto Android
 
@@ -97,16 +96,16 @@ docker exec virtuale-worker ls -lh /opt/redroid-ui/tools/
 
 ### Logs esperados em caso de erro:
 
-- ❌ `create_keyboard binary not found at /opt/redroid-ui/tools`
+- `create_keyboard binary not found at /opt/virtuale/tools`
   → Volume não foi montado corretamente
 
-- ❌ `docker cp failed` ou `chmod failed`
+- `docker cp failed` ou `chmod failed`
   → Problema de permissões (raro em Portainer)
 
-- ❌ `failed to start create_keyboard daemon`
+- `failed to start create_keyboard daemon`
   → Binary pode não ser executável ou compatível com a imagem
 
-- ❌ `qemu-keyboard device not found`
+- `qemu-keyboard device not found`
   → O create_keyboard está rodando mas o uinput device não foi criado
 
 ### Se tiver problemas, me mostre:

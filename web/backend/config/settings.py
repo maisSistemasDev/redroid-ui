@@ -14,10 +14,10 @@ env = environ.Env(
     ALLOWED_HOSTS=(list, ["*"]),
     CORS_ALLOWED_ORIGINS=(list, []),
     DATABASE_URL=(str, f"sqlite:///{BASE_DIR / 'db.sqlite3'}"),
-    REDROID_USE_SUDO_DOCKER=(bool, sys.platform == "linux"),
+    USE_SUDO_DOCKER=(bool, sys.platform == "linux"),
     TOOLS_DIR=(str, str(PROJECT_ROOT / "tools")),
-    REDROID_SCRIPT_DIR=(str, str(PROJECT_ROOT / "redroid-script")),
-    DATA_ROOT=(str, str(Path.home() / ".local" / "share" / "redroid-ui" / "instances")),
+    BUILD_SCRIPT_DIR=(str, str(PROJECT_ROOT / "redroid-script")),
+    DATA_ROOT=(str, str(Path.home() / ".local" / "share" / "virtuale" / "instances")),
     DATA_VOLUME=(str, ""),
     REDIS_URL=(str, ""),
     LOG_LEVEL=(str, "INFO"),
@@ -146,12 +146,12 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
 
-REDROID_USE_SUDO_DOCKER: bool = env("REDROID_USE_SUDO_DOCKER")
+USE_SUDO_DOCKER: bool = env("USE_SUDO_DOCKER", default=env("REDROID_USE_SUDO_DOCKER", default=sys.platform == "linux"))
 TOOLS_DIR: str = env("TOOLS_DIR")
-REDROID_SCRIPT_DIR: str = env("REDROID_SCRIPT_DIR")
+BUILD_SCRIPT_DIR: str = env("BUILD_SCRIPT_DIR", default=env("REDROID_SCRIPT_DIR", default=str(PROJECT_ROOT / "redroid-script")))
 DATA_ROOT: str = env("DATA_ROOT")
 DATA_VOLUME: str = env("DATA_VOLUME")
-REDROID_DOCKER_NETWORK: str = env("REDROID_DOCKER_NETWORK", default="")
+DOCKER_NETWORK: str = env("DOCKER_NETWORK", default=env("REDROID_DOCKER_NETWORK", default=""))
 
 LOG_LEVEL = env("LOG_LEVEL").upper()
 if LOG_LEVEL not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:

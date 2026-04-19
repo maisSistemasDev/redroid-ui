@@ -10,13 +10,13 @@ const routes = [
     path: '/login',
     name: 'Login',
     component: () => import('../views/LoginView.vue'),
-    meta: { guest: true },
+    meta: { guest: true, hideSidebar: true },
   },
   {
     path: '/register',
     name: 'Register',
     component: () => import('../views/RegisterView.vue'),
-    meta: { guest: true },
+    meta: { guest: true, hideSidebar: true },
   },
   {
     path: '/dashboard',
@@ -28,7 +28,7 @@ const routes = [
     path: '/viewer/:id',
     name: 'Viewer',
     component: () => import('../views/ViewerView.vue'),
-    meta: { requiresAuth: true },
+    meta: { requiresAuth: true, hideSidebar: true },
   },
 ]
 

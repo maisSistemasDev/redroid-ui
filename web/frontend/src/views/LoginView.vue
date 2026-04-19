@@ -33,8 +33,9 @@ async function handleSubmit() {
 <template>
   <div class="auth-page">
     <form class="auth-card" @submit.prevent="handleSubmit">
+      <div class="auth-brand">Virtuale</div>
       <h1 class="auth-title">Entrar</h1>
-      <p class="auth-subtitle">Acesse o painel re-droid</p>
+      <p class="auth-subtitle">Acesse o painel de gerenciamento</p>
 
       <div v-if="error" class="error-msg">{{ error }}</div>
 
@@ -84,21 +85,36 @@ async function handleSubmit() {
   align-items: center;
   justify-content: center;
   padding: 20px;
+  background: radial-gradient(ellipse at 30% 20%, rgba(92, 184, 228, 0.06), transparent 60%),
+              radial-gradient(ellipse at 70% 80%, rgba(92, 184, 228, 0.04), transparent 50%),
+              var(--bg);
+  min-height: 100vh;
 }
 
 .auth-card {
   width: 100%;
   max-width: 400px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 36px 32px;
+  background: rgba(26, 29, 33, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-pill);
+  padding: 40px 36px;
+}
+
+.auth-brand {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 20px;
 }
 
 .auth-title {
-  font-size: 24px;
+  font-size: 26px;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--fg);
   margin-bottom: 4px;
 }
 
@@ -114,6 +130,7 @@ async function handleSubmit() {
   padding: 12px;
   font-size: 14px;
   margin-top: 8px;
+  border-radius: 12px;
 }
 
 .auth-footer {

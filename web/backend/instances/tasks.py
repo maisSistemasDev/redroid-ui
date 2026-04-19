@@ -11,7 +11,7 @@ from django.contrib.auth import get_user_model
 
 from .models import Instance
 from .serializers import InstanceSerializer
-from .services import AdbService, DockerService, TouchService, VpnService
+from .services import AdbService, DockerService, GpsService, MagiskService, TouchService, VpnService, apply_device_profile, resolve_serial
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def _instance_payload(instance: Instance) -> dict:
         data["running"] = False
         data["status"] = "unknown"
     try:
-        data["connection_status"] = AdbService.connection_status(instance.serial)
+        data["connection_status"] = AdbService.connection_status(resolve_serial(instance))
     except Exception:
         data["connection_status"] = "unknown"
     if instance.vpn_enabled:
@@ -72,6 +72,7 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
         image = payload.get("image", "redroid/redroid:12.0.0_64only-latest")
         gpu_mode = payload.get("gpu_mode", "guest")
         extra_props = payload.get("extra_props", "")
+        device_profile = payload.get("device_profile", "")
         vpn_enabled = bool(payload.get("vpn_enabled", False))
         vpn_type = payload.get("vpn_type", "openvpn")
         vpn_provider = payload.get("vpn_provider", "custom")
@@ -80,8 +81,11 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
         vpn_username = payload.get("vpn_username", "")
         vpn_password = payload.get("vpn_password", "")
         vpn_country = payload.get("vpn_country", "")
+        magisk_enabled = bool(payload.get("magisk_enabled", False))
+        fake_lat = payload.get("fake_lat")
+        fake_lng = payload.get("fake_lng")
 
-        # --- VPN sidecar setup (before creating the redroid container) ---
+        # --- VPN sidecar setup (before creating the Android container) ---
         if vpn_enabled:
             if vpn_type == "openvpn" and vpn_provider == "custom" and not vpn_config.strip():
                 raise RuntimeError("Conteúdo do arquivo .ovpn é obrigatório quando VPN custom/OpenVPN está ativa.")
@@ -100,14 +104,32 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
             if not VpnService.wait_tunnel(name, timeout=tunnel_timeout, vpn_type=vpn_type):
                 logger.warning("create_instance_task: VPN tunnel not ready for %s, continuing anyway", name)
 
+        effective_image = image
+        if device_profile:
+            effective_image = apply_device_profile(image, device_profile)
+            if effective_image != image:
+                logger.info("create_instance_task: using profiled image %s for %s", effective_image, name)
+
+        if magisk_enabled:
+            try:
+                effective_image = MagiskService.apply_magisk(effective_image)
+                logger.info("create_instance_task: using magisk image %s for %s", effective_image, name)
+            except Exception as e:
+                logger.warning("create_instance_task: Magisk image creation failed: %s", e)
+                magisk_enabled = False
+
         cid = DockerService.create_container(
             name=name,
-            image=image,
+            image=effective_image,
             gpu_mode=gpu_mode,
             extra_props=extra_props,
             user_id=user.id,
-            vpn_enabled=vpn_enabled,
         )
+
+        # Gateway mode: set the sidecar as the Android container's gateway
+        # so internet traffic flows through the VPN/Tor tunnel.
+        if vpn_enabled:
+            VpnService.setup_gateway(name)
 
         instance = Instance.objects.create(
             user=user,
@@ -116,18 +138,26 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
             image=image,
             gpu_mode=gpu_mode,
             extra_props=extra_props,
+            device_profile=device_profile,
+            magisk_enabled=magisk_enabled,
             vpn_enabled=vpn_enabled,
             vpn_type=vpn_type,
             vpn_provider=vpn_provider,
             vpn_username=vpn_username,
             vpn_password=vpn_password,
             vpn_country=vpn_country,
+            fake_lat=fake_lat,
+            fake_lng=fake_lng,
         )
         TouchService.setup_virtual_touch(name)
+        TouchService.setup_virtual_keyboard(name)
+        serial = resolve_serial(instance)
         try:
-            AdbService.connect(instance.serial)
-            if AdbService.wait_boot(instance.serial, 30):
-                AdbService.dismiss_overlays(instance.serial)
+            AdbService.connect(serial)
+            if AdbService.wait_boot(serial, 30):
+                AdbService.dismiss_overlays(serial)
+                if fake_lat is not None and fake_lng is not None:
+                    GpsService.set_location(serial, fake_lat, fake_lng)
         except Exception as e:
             logger.warning(
                 "create_instance_task: instance %s created but ADB is not ready yet (%s)",
@@ -173,9 +203,10 @@ def install_apk_task(self, user_id: int, instance_id: int, apk_path: str, filena
         if not path.exists():
             raise RuntimeError("Arquivo APK temporário não encontrado para processamento.")
 
-        AdbService.connect(instance.serial)
+        serial = resolve_serial(instance)
+        AdbService.connect(serial)
         container_hint = (instance.container_id or instance.name or "").strip()
-        AdbService.install_apk(instance.serial, str(path), container_hint=container_hint)
+        AdbService.install_apk(serial, str(path), container_hint=container_hint)
         _publish_job(
             user_id,
             {

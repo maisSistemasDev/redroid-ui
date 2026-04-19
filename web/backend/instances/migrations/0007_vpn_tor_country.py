@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('instances', '0006_merge_0005_vpn_gluetun_fields_0005_vpn_type_provider'),
+        ('instances', '0006_merge_vpn_fields'),
     ]
 
     operations = [

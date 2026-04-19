@@ -13,6 +13,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import zipfile
 import time
 import uuid
 from pathlib import Path
@@ -21,13 +22,16 @@ from typing import Any
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
-FORCE_DOCKER_INSTALL = os.getenv("REDROID_FORCE_DOCKER_INSTALL", "0").lower() in {"1", "true", "yes", "on"}
+FORCE_DOCKER_INSTALL = (
+    os.getenv("FORCE_DOCKER_INSTALL", os.getenv("REDROID_FORCE_DOCKER_INSTALL", "0"))
+    .lower() in {"1", "true", "yes", "on"}
+)
 
 # ---------------------------------------------------------------------------
 # Docker CLI helpers
 # ---------------------------------------------------------------------------
 
-DOCKER_PS_FILTER = "label=redroid-ui.managed=1"
+DOCKER_PS_FILTER = "label=virtuale.managed=1"
 
 
 def _docker_exe() -> str:
@@ -36,13 +40,63 @@ def _docker_exe() -> str:
 
 def _docker_cmd() -> list[str]:
     exe = _docker_exe()
-    if settings.REDROID_USE_SUDO_DOCKER:
+    if settings.USE_SUDO_DOCKER:
         return ["sudo", "-n", exe]
     return [exe]
 
 
 def _run(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+_cached_app_network: str | None = None
+
+
+def _detect_app_network() -> str:
+    """Auto-detect a Docker network reachable from this container.
+
+    Inspects the current container (by hostname, which Docker sets to the
+    container ID) and returns the first non-bridge network found.  This
+    allows the sidecar to be attached to a shared network even when
+    ``DOCKER_NETWORK`` is not explicitly configured.
+    """
+    global _cached_app_network
+    if _cached_app_network is not None:
+        return _cached_app_network
+
+    dc = _docker_cmd()
+    cid = socket.gethostname()
+    p = _run(dc + ["inspect", cid], timeout=10)
+    if p.returncode != 0:
+        logger.debug("_detect_app_network: cannot inspect self (%s): %s", cid, _short(p.stderr))
+        _cached_app_network = ""
+        return ""
+    try:
+        data = json.loads(p.stdout)
+        if isinstance(data, list) and data:
+            data = data[0]
+        nets = (data.get("NetworkSettings") or {}).get("Networks") or {}
+        for name in nets:
+            if name not in ("bridge", "host", "none"):
+                logger.info("_detect_app_network: auto-detected network '%s'", name)
+                _cached_app_network = name
+                return name
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+    _cached_app_network = ""
+    return ""
+
+
+def _get_network() -> str:
+    """Return the Docker network name for sidecar connectivity.
+
+    Prefers the explicit ``DOCKER_NETWORK`` setting, falls back to
+    auto-detection from the current container's networks.
+    """
+    net = getattr(settings, "DOCKER_NETWORK", "")
+    if net:
+        return net
+    return _detect_app_network()
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +134,7 @@ class DockerService:
         }
 
     @staticmethod
-    def create_container(name: str, image: str, gpu_mode: str, extra_props: str, user_id: int, vpn_enabled: bool = False) -> str:
+    def create_container(name: str, image: str, gpu_mode: str, extra_props: str, user_id: int) -> str:
         data_dir = Path(settings.DATA_ROOT) / name
         # Best-effort local cleanup (works when backend has direct host access).
         if data_dir.exists():
@@ -92,8 +146,8 @@ class DockerService:
         # Wipe stale host data using a lightweight temp container BEFORE
         # starting Android.  This handles root-owned files and works in
         # Portainer / Docker-in-Docker where the backend cannot access the
-        # host filesystem.  We must NOT wipe /data inside a running redroid
-        # container — that would corrupt Android's data partition mid-boot.
+        # host filesystem.  We must NOT wipe /data inside a running Android
+        # container — that would corrupt the data partition mid-boot.
         dc = _docker_cmd()
         cleanup_done = False
         for cleanup_img in ("busybox", image):
@@ -113,15 +167,13 @@ class DockerService:
         cmd = dc + [
             "run", "-d",
             "--name", name,
-            "--label", "redroid-ui.managed=1",
-            "--label", f"redroid-ui.user={user_id}",
+            "--label", "virtuale.managed=1",
+            "--label", f"virtuale.user={user_id}",
             "--privileged",
             "-v", f"{data_dir}:/data",
         ]
-        network = getattr(settings, "REDROID_DOCKER_NETWORK", "")
-        if vpn_enabled:
-            cmd += ["--network", f"container:{name}-vpn"]
-        elif network:
+        network = _get_network()
+        if network:
             cmd += ["--network", network]
         cmd += [
             image,
@@ -129,9 +181,6 @@ class DockerService:
         ]
         image_lower = image.lower()
 
-        # GApps images need extra properties to avoid SetupWizard crash loop
-        # and prevent Google Play Services from creating overlay windows that
-        # block touch in apps using filterTouchesWhenObscured (e.g. WhatsApp).
         if any(k in image_lower for k in ("gapps", "litegapps", "mindthegapps")):
             cmd += [
                 "ro.setupwizard.mode=DISABLED",
@@ -211,7 +260,7 @@ class DockerService:
             try:
                 shutil.rmtree(target)
             except PermissionError:
-                if settings.REDROID_USE_SUDO_DOCKER:
+                if settings.USE_SUDO_DOCKER:
                     p = _run(["sudo", "-n", "rm", "-rf", str(target)], timeout=30)
                     if p.returncode != 0:
                         raise RuntimeError(
@@ -240,7 +289,7 @@ class DockerService:
                 shutil.rmtree(child)
                 removed.append(child.name)
             except PermissionError:
-                if settings.REDROID_USE_SUDO_DOCKER:
+                if settings.USE_SUDO_DOCKER:
                     p = _run(["sudo", "-n", "rm", "-rf", str(child)], timeout=30)
                     if p.returncode == 0:
                         removed.append(child.name)
@@ -496,14 +545,25 @@ class TouchService:
     def setup_virtual_touch(name: str) -> None:
         binary = Path(settings.TOOLS_DIR) / "create_touch"
         if not binary.exists():
+            logger.error(
+                "setup_virtual_touch: create_touch binary NOT FOUND at %s "
+                "(TOOLS_DIR=%s) — touch will NOT work!",
+                binary, settings.TOOLS_DIR,
+            )
             return
+        logger.info("setup_virtual_touch: deploying create_touch to %s", name)
         dc = _docker_cmd()
-        _run(dc + ["cp", str(binary), f"{name}:/create_touch"])
+        p = _run(dc + ["cp", str(binary), f"{name}:/create_touch"])
+        if p.returncode != 0:
+            logger.error("setup_virtual_touch: docker cp failed: %s", (p.stderr or p.stdout or "").strip())
+            return
         _run(dc + ["exec", name, "chmod", "+x", "/create_touch"])
-        _run(dc + ["exec", name, "sh", "-c", "pkill -f /create_touch 2>/dev/null || true"])
+        _run(dc + ["exec", name, "sh", "-c", "pkill -f create_touch 2>/dev/null || true"])
         time.sleep(0.5)
         _run(dc + ["exec", name, "sh", "-c", "rm -f /dev/input/event*"])
-        _run(dc + ["exec", "-d", name, "/create_touch"])
+        _run(dc + ["exec", "-d", name, "sh", "-c",
+             "while true; do /create_touch; sleep 1; done"])
+        logger.info("setup_virtual_touch: create_touch daemon started for %s", name)
         time.sleep(1.5)
         _run(dc + ["exec", name, "sh", "-c", """
 for d in /sys/devices/virtual/input/input*/; do
@@ -545,12 +605,11 @@ done
             logger.error("setup_virtual_keyboard: chmod failed for %s: %s", name, p.stderr or p.stdout)
             return
 
-        # Kill any existing daemon
-        p = _run(dc + ["exec", name, "sh", "-c", "pkill -f /create_keyboard 2>/dev/null || true"])
+        _run(dc + ["exec", name, "sh", "-c", "pkill -f create_keyboard 2>/dev/null || true"])
         time.sleep(0.5)
 
-        # Start daemon
-        p = _run(dc + ["exec", "-d", name, "/create_keyboard"])
+        p = _run(dc + ["exec", "-d", name, "sh", "-c",
+                 "while true; do /create_keyboard; sleep 1; done"])
         if p.returncode != 0:
             logger.error("setup_virtual_keyboard: failed to start create_keyboard daemon for %s: %s", name, p.stderr or p.stdout)
             return
@@ -744,7 +803,7 @@ def cmd_send_direct(serial: str, cmd: str, timeout: int = 12) -> bool:
 
 
 def _serial_container_name(serial: str) -> str:
-    """Extract the redroid container name from an ADB serial.
+    """Extract the Android container name from an ADB serial.
 
     When VPN is active the serial looks like ``{name}-vpn:5555`` but the
     Android container is simply ``{name}``.  Strip the ``-vpn`` suffix so
@@ -755,7 +814,7 @@ def _serial_container_name(serial: str) -> str:
         return ""
     if not re.match(r"^[a-zA-Z0-9_.-]+$", host):
         return ""
-    # VPN sidecar names end with '-vpn'; the redroid container is without.
+    # VPN sidecar names end with '-vpn'; the Android container is without.
     if host.endswith("-vpn"):
         host = host[:-4]
     return host
@@ -776,7 +835,7 @@ def _install_apk_via_docker_exec(serial: str, apk_path: str, container_hint: str
     if not src.exists():
         return False, f"arquivo local não encontrado: {src}"
 
-    dst = f"/data/local/tmp/redroid-ui-{uuid.uuid4().hex}.apk"
+    dst = f"/data/local/tmp/virtuale-{uuid.uuid4().hex}.apk"
     try:
         cp = _run(_docker_cmd() + ["cp", str(src), f"{cname}:{dst}"], timeout=120)
     except subprocess.TimeoutExpired:
@@ -875,6 +934,91 @@ def cmd_send_root(serial: str, cmd: str, timeout: int = 12) -> bool:
     return cmd_send_direct(serial, cmd, timeout=timeout)
 
 
+def cmd_sendevent_tap(serial: str, dev: str, x: int, y: int,
+                      tracking_id: int = 1, timeout: int = 8) -> bool:
+    """Tap via ``sendevent`` through ADB — bypasses filterTouchesWhenObscured.
+
+    ``sendevent`` writes directly to the kernel input device, so Android's
+    WindowManager overlay/obscured checks are never consulted.  Unlike
+    ``input tap`` (which uses InputManager.injectInputEvent and is subject
+    to the obscured flag), ``sendevent`` events arrive as genuine hardware
+    events from the kernel's perspective.
+
+    Uses ADB shell (not docker exec) because the Android runtime manages
+    its own ``/dev`` mount — device nodes created by ueventd are only
+    visible inside the Android namespace, which ADB's adbd runs in.
+    """
+    if not dev:
+        return False
+
+    script = (
+        f"sendevent {dev} 3 47 0 && sendevent {dev} 3 57 {tracking_id} && "
+        f"sendevent {dev} 3 53 {x} && sendevent {dev} 3 54 {y} && "
+        f"sendevent {dev} 3 48 5 && sendevent {dev} 3 58 50 && "
+        f"sendevent {dev} 1 330 1 && sendevent {dev} 0 0 0 && "
+        "sleep 0.06 && "
+        f"sendevent {dev} 3 48 0 && sendevent {dev} 3 58 0 && "
+        f"sendevent {dev} 3 57 4294967295 && "
+        f"sendevent {dev} 1 330 0 && sendevent {dev} 0 0 0"
+    )
+
+    try:
+        AdbService.connect(serial)
+    except Exception:
+        pass
+    p = _run(["adb", "-s", serial, "shell", script], timeout=timeout)
+    if p.returncode != 0:
+        logger.warning(
+            "cmd_sendevent_tap: failed for %s dev=%s (%d,%d) rc=%s err=%s",
+            serial, dev, x, y, p.returncode,
+            (p.stderr or p.stdout or "").strip()[:200],
+        )
+    return p.returncode == 0
+
+
+def sendevent_down(serial: str, dev: str, x: int, y: int, tracking_id: int) -> None:
+    """Send touch-down via persistent adb shell + sendevent (real-time drag)."""
+    if not dev:
+        return
+    cmd_send(serial, (
+        f"sendevent {dev} 3 47 0;"
+        f"sendevent {dev} 3 57 {tracking_id};"
+        f"sendevent {dev} 3 53 {x};"
+        f"sendevent {dev} 3 54 {y};"
+        f"sendevent {dev} 3 48 5;"
+        f"sendevent {dev} 3 58 50;"
+        f"sendevent {dev} 1 330 1;"
+        f"sendevent {dev} 0 0 0"
+    ))
+
+
+def sendevent_move(serial: str, dev: str, x: int, y: int) -> None:
+    """Send position update via persistent adb shell + sendevent (real-time drag)."""
+    if not dev:
+        return
+    cmd_send(serial, (
+        f"sendevent {dev} 3 47 0;"
+        f"sendevent {dev} 3 53 {x};"
+        f"sendevent {dev} 3 54 {y};"
+        f"sendevent {dev} 3 48 5;"
+        f"sendevent {dev} 3 58 50;"
+        f"sendevent {dev} 0 0 0"
+    ))
+
+
+def sendevent_up(serial: str, dev: str) -> None:
+    """Send touch-up via persistent adb shell + sendevent (real-time drag)."""
+    if not dev:
+        return
+    cmd_send(serial, (
+        f"sendevent {dev} 3 48 0;"
+        f"sendevent {dev} 3 58 0;"
+        f"sendevent {dev} 3 57 4294967295;"
+        f"sendevent {dev} 1 330 0;"
+        f"sendevent {dev} 0 0 0"
+    ))
+
+
 def clamp_coords(nx: float, ny: float) -> tuple[int, int]:
     return (min(int(nx * 719), 719), min(int(ny * 1279), 1279))
 
@@ -889,8 +1033,559 @@ def cleanup_procs(serial: str) -> None:
 # ---------------------------------------------------------------------------
 # Port allocation
 # ---------------------------------------------------------------------------
-# Spoof logic
+# Device profiles & spoof logic
 # ---------------------------------------------------------------------------
+# Magisk support
+# ---------------------------------------------------------------------------
+
+MAGISK_APK_URL = (
+    "https://cdn.jsdelivr.net/gh/topjohnwu/magisk-files"
+    "@1cea72840fbf690f9a95512d03721f6a710fe02e/app-debug.apk"
+)
+
+MAGISK_INIT_RC = """\
+on early-init
+\texport PATH /sbin:/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin
+\tchmod 0700 /magisk.tar
+\tchown root root /magisk.tar
+\tchmod 0700 /setup.sh
+\tchown root root /setup.sh
+\texec root root -- /setup.sh
+service magisk-d /sbin/magisk --daemon
+\tuser root
+\toneshot
+on boot
+\tstart magisk-d
+on post-fs-data
+\tstart logd
+\trm /dev/.magisk-unblock
+\tstart s1
+\twait /dev/.magisk-unblock 5
+\trm /dev/.magisk-unblock
+service s1 /sbin/magisk --post-fs-data
+\tuser root
+\toneshot
+service s2 /sbin/magisk --service
+\tclass late_start
+\tuser root
+\toneshot
+on property:sys.boot_completed=1
+\texec /sbin/magisk --boot-complete
+on property:init.svc.zygote=restarting
+\texec /sbin/magisk --zygote-restart
+on property:init.svc.zygote=stopped
+\texec /sbin/magisk --zygote-restart
+"""
+
+MAGISK_SETUP_SH = """\
+#!/system/bin/sh
+tmpPushed=/magisk
+rm -rf $tmpPushed
+mkdir $tmpPushed
+tar -xf /magisk.tar --no-same-owner -C $tmpPushed
+umount /magisk.tar ; rm -f /magisk.tar
+mkdir -p /sbin
+chown root:root /sbin
+chmod 0751 /sbin
+cp $tmpPushed/magisk /sbin/
+cp $tmpPushed/app-debug.apk /sbin/stub.apk
+find /sbin -type f -exec chmod 0755 {} \\;
+find /sbin -type f -exec chown root:root {} \\;
+ln -f -s /sbin/magisk /system/xbin/su
+mkdir -p /product/bin
+chmod 751 /product/bin
+ln -f -s /sbin/magisk /product/bin/su
+mkdir -p /data/adb/magisk
+chmod 700 /data/adb
+mv $tmpPushed/busybox /data/adb/magisk/
+chmod -R 755 /data/adb/magisk
+chown -R root:root /data/adb/magisk
+rm -rf $tmpPushed
+"""
+
+
+class MagiskService:
+
+    @staticmethod
+    def apply_magisk(base_image: str) -> str:
+        """Create a Magisk-enabled Docker image via docker commit.
+
+        Flow: docker create -> docker cp (inject files) -> docker commit.
+        Returns the new image tag (e.g. 'redroid:14.0.0-latest-magisk').
+        Reuses existing image if already built.
+        """
+        if ":" in base_image:
+            new_tag = f"{base_image}-magisk"
+        else:
+            new_tag = f"{base_image}:magisk"
+
+        dc = _docker_cmd()
+
+        p = _run(dc + ["image", "inspect", new_tag], timeout=15)
+        if p.returncode == 0:
+            logger.info("apply_magisk: image %s already exists, reusing", new_tag)
+            return new_tag
+
+        logger.info("apply_magisk: downloading Magisk APK...")
+        import urllib.request
+        with tempfile.TemporaryDirectory(prefix="magisk-") as tmpdir:
+            tmpdir_p = Path(tmpdir)
+            apk_path = tmpdir_p / "app-debug.apk"
+            try:
+                urllib.request.urlretrieve(MAGISK_APK_URL, str(apk_path))
+            except Exception as e:
+                raise RuntimeError(f"Failed to download Magisk APK: {e}")
+
+            magisk_bin_dir = tmpdir_p / "magisk_bin"
+            magisk_bin_dir.mkdir()
+            with zipfile.ZipFile(str(apk_path)) as zf:
+                for member in ("lib/x86_64/libmagisk64.so", "lib/x86_64/libbusybox.so"):
+                    data = zf.read(member)
+                    out_name = "magisk" if "magisk64" in member else "busybox"
+                    out_path = magisk_bin_dir / out_name
+                    out_path.write_bytes(data)
+                    out_path.chmod(0o755)
+
+            tar_path = tmpdir_p / "magisk.tar"
+            p = subprocess.run(
+                ["tar", "--transform", "s/.*\\///g", "-cf", str(tar_path),
+                 str(magisk_bin_dir / "magisk"),
+                 str(magisk_bin_dir / "busybox"),
+                 str(apk_path)],
+                timeout=30, capture_output=True, text=True,
+            )
+            if p.returncode != 0:
+                raise RuntimeError(f"Failed to create magisk.tar: {p.stderr.strip()}")
+
+            tmp_name = f"virtuale-magisk-{uuid.uuid4().hex[:8]}"
+            try:
+                logger.info("apply_magisk: creating temp container from %s", base_image)
+                p = _run(dc + ["create", "--name", tmp_name, base_image], timeout=120)
+                if p.returncode != 0:
+                    raise RuntimeError(f"Failed to create temp container: {(p.stderr or p.stdout or '').strip()}")
+
+                rc_content = MAGISK_INIT_RC.encode()
+                setup_content = MAGISK_SETUP_SH.encode()
+                tar_content = tar_path.read_bytes()
+
+                ok = _docker_cp_write(tmp_name, "system/etc/init", "magisk_init.rc", rc_content, mode=0o644)
+                if not ok:
+                    raise RuntimeError("Failed to copy magisk_init.rc")
+                ok = _docker_cp_write(tmp_name, "", "setup.sh", setup_content, mode=0o700)
+                if not ok:
+                    raise RuntimeError("Failed to copy setup.sh")
+                ok = _docker_cp_write(tmp_name, "", "magisk.tar", tar_content, mode=0o700)
+                if not ok:
+                    raise RuntimeError("Failed to copy magisk.tar")
+
+                p = _run(dc + ["commit", tmp_name, new_tag], timeout=300)
+                if p.returncode != 0:
+                    raise RuntimeError(f"Commit failed: {(p.stderr or p.stdout or '').strip()}")
+
+                logger.info("apply_magisk: created image %s", new_tag)
+                return new_tag
+            finally:
+                _run(dc + ["rm", "-f", tmp_name], timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# Device profiles & spoof logic
+# ---------------------------------------------------------------------------
+
+_COMMON_ANTI_DETECT = {
+    # --- Build type: look like a production device, not eng/userdebug ---
+    "ro.build.tags": "release-keys",
+    "ro.build.type": "user",
+    "ro.build.flavor": "user",
+
+    # --- Verified boot: pretend bootloader is locked & verified ---
+    "ro.boot.verifiedbootstate": "green",
+    "ro.boot.flash.locked": "1",
+    "ro.boot.vbmeta.device_state": "locked",
+    "ro.boot.veritymode": "enforcing",
+
+    # --- Security patch level ---
+    "ro.build.version.security_patch": "2025-03-05",
+    "ro.vendor.build.security_patch": "2025-03-05",
+
+    # --- Anti-emulator: remove qemu/goldfish/ranchu markers ---
+    "ro.kernel.qemu": "0",
+    "ro.kernel.qemu.gles": "0",
+    "ro.hardware.chipname": "exynos990",
+    "ro.board.platform": "universal",
+    "ro.boot.hardware.revision": "MP1.0",
+
+    # --- API level: pretend shipped with this Android version ---
+    "ro.product.first_api_level": "33",
+
+    # --- SELinux: enforcing like production devices ---
+    "ro.build.selinux": "1",
+
+    # --- Network: pretend WiFi is real ---
+    "ro.hardware.wifi": "qcom",
+    "wifi.interface": "wlan0",
+
+    # --- Telephony: basic phone identity ---
+    "ro.telephony.default_network": "9",
+    "gsm.version.baseband": "1.0",
+    "gsm.version.ril-impl": "android qualcomm RIL 1.0",
+
+    # --- GL / GPU: look like real mobile GPU ---
+    "ro.opengles.version": "196610",
+    "ro.hardware.egl": "mali",
+
+    # --- Misc anti-fingerprinting ---
+    "ro.setupwizard.mode": "OPTIONAL",
+    "ro.com.google.gmsversion": "14_202408",
+    "persist.sys.timezone": "America/Sao_Paulo",
+    "ro.url.legal": "http://www.google.com/intl/%s/mobile/android/basic/phone-legal.html",
+    "ro.com.google.clientidbase": "android-google",
+    "ro.boot.warranty_bit": "0",
+    "ro.warranty_bit": "0",
+    "ro.is_ever_orange": "0",
+}
+
+DEVICE_PROFILES: dict[str, dict[str, str]] = {
+    "pixel6": {
+        "label": "Google Pixel 6",
+        "ro.product.brand": "google",
+        "ro.product.manufacturer": "Google",
+        "ro.product.model": "Pixel 6",
+        "ro.product.device": "oriole",
+        "ro.product.name": "oriole",
+        "ro.hardware": "oriole",
+        "ro.build.display.id": "AP2A.240805.005",
+        "ro.build.id": "AP2A.240805.005",
+        "ro.build.fingerprint": "google/oriole/oriole:14/AP2A.240805.005/12025142:user/release-keys",
+        "ro.build.version.incremental": "12025142",
+        "ro.build.description": "oriole-user 14 AP2A.240805.005 12025142 release-keys",
+        "ro.product.first_api_level": "31",
+        "ro.product.board": "oriole",
+        "ro.board.platform": "gs101",
+        "ro.hardware.chipname": "gs101",
+        "ro.hardware.egl": "mali",
+        "ro.hardware.wifi": "bcmdhd",
+        "ro.com.google.clientidbase": "android-google",
+        "ro.soc.manufacturer": "Google",
+        "ro.soc.model": "Tensor",
+        **_COMMON_ANTI_DETECT,
+    },
+    "pixel7": {
+        "label": "Google Pixel 7",
+        "ro.product.brand": "google",
+        "ro.product.manufacturer": "Google",
+        "ro.product.model": "Pixel 7",
+        "ro.product.device": "panther",
+        "ro.product.name": "panther",
+        "ro.hardware": "panther",
+        "ro.build.display.id": "AP2A.240805.005",
+        "ro.build.id": "AP2A.240805.005",
+        "ro.build.fingerprint": "google/panther/panther:14/AP2A.240805.005/12025142:user/release-keys",
+        "ro.build.version.incremental": "12025142",
+        "ro.build.description": "panther-user 14 AP2A.240805.005 12025142 release-keys",
+        "ro.product.first_api_level": "33",
+        "ro.product.board": "panther",
+        "ro.board.platform": "gs201",
+        "ro.hardware.chipname": "gs201",
+        "ro.hardware.egl": "mali",
+        "ro.hardware.wifi": "bcmdhd",
+        "ro.com.google.clientidbase": "android-google",
+        "ro.soc.manufacturer": "Google",
+        "ro.soc.model": "Tensor G2",
+        **_COMMON_ANTI_DETECT,
+    },
+    "pixel8": {
+        "label": "Google Pixel 8",
+        "ro.product.brand": "google",
+        "ro.product.manufacturer": "Google",
+        "ro.product.model": "Pixel 8",
+        "ro.product.device": "shiba",
+        "ro.product.name": "shiba",
+        "ro.hardware": "shiba",
+        "ro.build.display.id": "AP2A.240805.005",
+        "ro.build.id": "AP2A.240805.005",
+        "ro.build.fingerprint": "google/shiba/shiba:14/AP2A.240805.005/12025142:user/release-keys",
+        "ro.build.version.incremental": "12025142",
+        "ro.build.description": "shiba-user 14 AP2A.240805.005 12025142 release-keys",
+        "ro.product.first_api_level": "34",
+        "ro.product.board": "shiba",
+        "ro.board.platform": "zuma",
+        "ro.hardware.chipname": "zuma",
+        "ro.hardware.egl": "mali",
+        "ro.hardware.wifi": "bcmdhd",
+        "ro.com.google.clientidbase": "android-google",
+        "ro.soc.manufacturer": "Google",
+        "ro.soc.model": "Tensor G3",
+        **_COMMON_ANTI_DETECT,
+    },
+    "samsung_s23": {
+        "label": "Samsung Galaxy S23",
+        "ro.product.brand": "samsung",
+        "ro.product.manufacturer": "samsung",
+        "ro.product.model": "SM-S911B",
+        "ro.product.device": "dm1q",
+        "ro.product.name": "dm1qxxx",
+        "ro.hardware": "qcom",
+        "ro.build.display.id": "TP1A.220624.014.S911BXXS7CXF3",
+        "ro.build.id": "TP1A.220624.014",
+        "ro.build.fingerprint": "samsung/dm1qxxx/dm1q:14/TP1A.220624.014/S911BXXS7CXF3:user/release-keys",
+        "ro.build.version.incremental": "S911BXXS7CXF3",
+        "ro.build.description": "dm1qxxx-user 14 TP1A.220624.014 S911BXXS7CXF3 release-keys",
+        "ro.product.first_api_level": "33",
+        "ro.product.board": "kalama",
+        "ro.board.platform": "kalama",
+        "ro.hardware.chipname": "sm8550",
+        "ro.hardware.egl": "adreno",
+        "ro.hardware.wifi": "qcom",
+        "ro.com.google.clientidbase": "android-samsung-ss",
+        "ro.soc.manufacturer": "Qualcomm",
+        "ro.soc.model": "SM8550",
+        **_COMMON_ANTI_DETECT,
+    },
+    "samsung_s24": {
+        "label": "Samsung Galaxy S24",
+        "ro.product.brand": "samsung",
+        "ro.product.manufacturer": "samsung",
+        "ro.product.model": "SM-S921B",
+        "ro.product.device": "e1q",
+        "ro.product.name": "e1qxxx",
+        "ro.hardware": "qcom",
+        "ro.build.display.id": "UP1A.231005.007.S921BXXS3AXE2",
+        "ro.build.id": "UP1A.231005.007",
+        "ro.build.fingerprint": "samsung/e1qxxx/e1q:14/UP1A.231005.007/S921BXXS3AXE2:user/release-keys",
+        "ro.build.version.incremental": "S921BXXS3AXE2",
+        "ro.build.description": "e1qxxx-user 14 UP1A.231005.007 S921BXXS3AXE2 release-keys",
+        "ro.product.first_api_level": "34",
+        "ro.product.board": "sun",
+        "ro.board.platform": "sun",
+        "ro.hardware.chipname": "s5e9945",
+        "ro.hardware.egl": "mali",
+        "ro.hardware.wifi": "bcmdhd",
+        "ro.com.google.clientidbase": "android-samsung-ss",
+        "ro.soc.manufacturer": "Samsung",
+        "ro.soc.model": "s5e9945",
+        **_COMMON_ANTI_DETECT,
+    },
+    "samsung_a54": {
+        "label": "Samsung Galaxy A54",
+        "ro.product.brand": "samsung",
+        "ro.product.manufacturer": "samsung",
+        "ro.product.model": "SM-A546B",
+        "ro.product.device": "a54x",
+        "ro.product.name": "a54xnsxx",
+        "ro.hardware": "exynos",
+        "ro.build.display.id": "UP1A.231005.007.A546BXXS9CXE2",
+        "ro.build.id": "UP1A.231005.007",
+        "ro.build.fingerprint": "samsung/a54xnsxx/a54x:14/UP1A.231005.007/A546BXXS9CXE2:user/release-keys",
+        "ro.build.version.incremental": "A546BXXS9CXE2",
+        "ro.build.description": "a54xnsxx-user 14 UP1A.231005.007 A546BXXS9CXE2 release-keys",
+        "ro.product.first_api_level": "33",
+        "ro.product.board": "s5e8835",
+        "ro.board.platform": "universal8835",
+        "ro.hardware.chipname": "s5e8835",
+        "ro.hardware.egl": "mali",
+        "ro.hardware.wifi": "bcmdhd",
+        "ro.com.google.clientidbase": "android-samsung-ss",
+        "ro.soc.manufacturer": "Samsung",
+        "ro.soc.model": "Exynos 1380",
+        **_COMMON_ANTI_DETECT,
+    },
+    "xiaomi_14": {
+        "label": "Xiaomi 14",
+        "ro.product.brand": "Xiaomi",
+        "ro.product.manufacturer": "Xiaomi",
+        "ro.product.model": "23127PN0CC",
+        "ro.product.device": "houji",
+        "ro.product.name": "houji",
+        "ro.hardware": "qcom",
+        "ro.build.display.id": "UKQ1.231003.002",
+        "ro.build.id": "UKQ1.231003.002",
+        "ro.build.fingerprint": "Xiaomi/houji/houji:14/UKQ1.231003.002/V816.0.9.0.UNCCNXM:user/release-keys",
+        "ro.build.version.incremental": "V816.0.9.0.UNCCNXM",
+        "ro.build.description": "houji-user 14 UKQ1.231003.002 V816.0.9.0.UNCCNXM release-keys",
+        "ro.product.first_api_level": "34",
+        "ro.product.board": "kalama",
+        "ro.board.platform": "kalama",
+        "ro.hardware.chipname": "sm8650",
+        "ro.hardware.egl": "adreno",
+        "ro.hardware.wifi": "qcom",
+        "ro.com.google.clientidbase": "android-xiaomi",
+        "ro.soc.manufacturer": "Qualcomm",
+        "ro.soc.model": "SM8650",
+        **_COMMON_ANTI_DETECT,
+    },
+    "oneplus_12": {
+        "label": "OnePlus 12",
+        "ro.product.brand": "OnePlus",
+        "ro.product.manufacturer": "OnePlus",
+        "ro.product.model": "CPH2583",
+        "ro.product.device": "aston",
+        "ro.product.name": "aston",
+        "ro.hardware": "qcom",
+        "ro.build.display.id": "CPH2583_14.0.0.800",
+        "ro.build.id": "UP1A.231005.007",
+        "ro.build.fingerprint": "OnePlus/aston/aston:14/UP1A.231005.007/T.18c3716_11551:user/release-keys",
+        "ro.build.version.incremental": "T.18c3716_11551",
+        "ro.build.description": "aston-user 14 UP1A.231005.007 T.18c3716_11551 release-keys",
+        "ro.product.first_api_level": "34",
+        "ro.product.board": "kalama",
+        "ro.board.platform": "kalama",
+        "ro.hardware.chipname": "sm8650",
+        "ro.hardware.egl": "adreno",
+        "ro.hardware.wifi": "qcom",
+        "ro.com.google.clientidbase": "android-oneplus",
+        "ro.soc.manufacturer": "Qualcomm",
+        "ro.soc.model": "SM8650",
+        **_COMMON_ANTI_DETECT,
+    },
+}
+
+
+def get_device_profiles() -> list[dict[str, str]]:
+    """Return list of available profiles for the API/frontend."""
+    return [{"value": k, "label": v["label"]} for k, v in DEVICE_PROFILES.items()]
+
+
+def device_profile_props(profile_key: str) -> list[str]:
+    """Return list of 'key=value' props for a given device profile."""
+    profile = DEVICE_PROFILES.get(profile_key)
+    if not profile:
+        return []
+    return [f"{k}={v}" for k, v in profile.items() if k.startswith("ro.")]
+
+
+def _patch_build_prop_with_profile(content: str, profile_key: str) -> str:
+    """Patch build.prop content using a device profile's props.
+
+    Expands product/build props across all Android partition prefixes so the
+    identity is consistent in system, vendor, product, etc.
+    """
+    profile = DEVICE_PROFILES.get(profile_key)
+    if not profile:
+        return content
+
+    replacements: dict[str, str] = {}
+
+    brand = profile.get("ro.product.brand", "")
+    device = profile.get("ro.product.device", "")
+    manufacturer = profile.get("ro.product.manufacturer", "")
+    model = profile.get("ro.product.model", "")
+    pname = profile.get("ro.product.name", "")
+    fingerprint = profile.get("ro.build.fingerprint", "")
+    incremental = profile.get("ro.build.version.incremental", "")
+
+    fp_prefixes = [
+        "ro.build", "ro.system.build", "ro.vendor.build", "ro.product.build",
+        "ro.odm.build", "ro.system_ext.build", "ro.bootimage.build",
+    ]
+    if fingerprint:
+        for pfx in fp_prefixes:
+            replacements[f"{pfx}.fingerprint"] = fingerprint
+    if incremental:
+        for pfx in fp_prefixes:
+            replacements[f"{pfx}.version.incremental"] = incremental
+
+    product_prefixes = [
+        "ro.product", "ro.product.system", "ro.product.vendor",
+        "ro.product.odm", "ro.product.system_ext", "ro.product.product",
+        "ro.product.bootimage",
+    ]
+    for pfx in product_prefixes:
+        if brand:
+            replacements[f"{pfx}.brand"] = brand
+        if device:
+            replacements[f"{pfx}.device"] = device
+        if manufacturer:
+            replacements[f"{pfx}.manufacturer"] = manufacturer
+        if model:
+            replacements[f"{pfx}.model"] = model
+        if pname:
+            replacements[f"{pfx}.name"] = pname
+
+    skip_keys = {"label"}
+    for key, val in profile.items():
+        if key not in skip_keys and key not in replacements and "." in key:
+            replacements[key] = val
+
+    lines = content.splitlines(keepends=True)
+    result: list[str] = []
+    seen_keys: set[str] = set()
+    for line in lines:
+        stripped = line.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            key = stripped.split("=", 1)[0]
+            if key in replacements:
+                result.append(f"{key}={replacements[key]}\n")
+                seen_keys.add(key)
+                continue
+        result.append(line)
+    for key, val in replacements.items():
+        if key not in seen_keys:
+            result.append(f"{key}={val}\n")
+    return "".join(result)
+
+
+def apply_device_profile(base_image: str, profile_key: str) -> str:
+    """Create a spoofed Docker image by patching build.prop files with a
+    device profile.  Returns the new image tag.
+
+    Flow: docker create (stopped) -> docker cp read/write -> docker commit.
+    This works because docker cp can write to stopped containers even if the
+    filesystem is read-only at runtime.
+    """
+    if not profile_key or profile_key not in DEVICE_PROFILES:
+        return base_image
+
+    profile_label = DEVICE_PROFILES[profile_key].get("label", profile_key)
+    if ":" in base_image:
+        base, tag = base_image.rsplit(":", 1)
+        new_tag = f"{base}:{tag}-{profile_key}"
+    else:
+        new_tag = f"{base_image}:{profile_key}"
+
+    dc = _docker_cmd()
+
+    p = _run(dc + ["image", "inspect", new_tag], timeout=15)
+    if p.returncode == 0:
+        logger.info("apply_device_profile: image %s already exists, reusing", new_tag)
+        return new_tag
+
+    tmp_name = f"virtuale-profile-{uuid.uuid4().hex[:8]}"
+    try:
+        logger.info("apply_device_profile: creating temp container from %s for profile %s", base_image, profile_label)
+        p = _run(dc + ["create", "--name", tmp_name, base_image], timeout=120)
+        if p.returncode != 0:
+            logger.warning("apply_device_profile: failed to create temp container: %s", (p.stderr or p.stdout or "").strip())
+            return base_image
+
+        patched = 0
+        for bp_path in SPOOF_BUILD_PROP_FILES:
+            raw = _docker_cp_read(tmp_name, bp_path)
+            if raw is None:
+                continue
+            original = raw.decode("utf-8", errors="replace")
+            patched_content = _patch_build_prop_with_profile(original, profile_key)
+            if patched_content == original:
+                continue
+            dest_dir = str(Path(bp_path).parent)
+            filename = Path(bp_path).name
+            if _docker_cp_write(tmp_name, dest_dir, filename, patched_content.encode("utf-8")):
+                patched += 1
+
+        if patched == 0:
+            logger.warning("apply_device_profile: no build.prop files were patched for %s", profile_key)
+            return base_image
+
+        p = _run(dc + ["commit", tmp_name, new_tag], timeout=300)
+        if p.returncode != 0:
+            logger.warning("apply_device_profile: commit failed: %s", (p.stderr or p.stdout or "").strip())
+            return base_image
+
+        logger.info("apply_device_profile: created image %s (%d files patched)", new_tag, patched)
+        return new_tag
+    finally:
+        _run(dc + ["rm", "-f", tmp_name], timeout=30)
+
 
 SPOOF_PROPS = {
     "fingerprint": "google/oriole/oriole:14/AP2A.240805.005/12025142:user/release-keys",
@@ -909,6 +1604,8 @@ SPOOF_BUILD_PROP_FILES = [
     "system/product/etc/build.prop",
     "system/system_ext/etc/build.prop",
     "vendor/odm/etc/build.prop",
+    "vendor/default.prop",
+    "default.prop",
 ]
 
 _spoof_lock = threading.Lock()
@@ -996,13 +1693,17 @@ def _docker_cp_write(container: str, dest_dir: str, filename: str, data: bytes, 
         info.size = len(data)
         info.mode = mode
         tar.addfile(info, io.BytesIO(data))
-    p = subprocess.run(dc + ["cp", "-", f"{container}:/{dest_dir}/"], input=buf.getvalue(), capture_output=True, timeout=30)
+    dest = f"/{dest_dir}/" if dest_dir else "/"
+    p = subprocess.run(dc + ["cp", "-", f"{container}:{dest}"], input=buf.getvalue(), capture_output=True, timeout=120)
+    if p.returncode != 0:
+        logger.warning("_docker_cp_write: failed to write %s to %s:%s%s: %s",
+                        filename, container, dest, filename, (p.stderr or b"").decode(errors="replace").strip()[:200])
     return p.returncode == 0
 
 
 def do_spoof(base_image: str) -> None:
     global _spoof_status
-    tmp_name = f"redroid-spoof-tmp-{uuid.uuid4().hex[:8]}"
+    tmp_name = f"virtuale-spoof-tmp-{uuid.uuid4().hex[:8]}"
     dc = _docker_cmd()
     log_lines: list[str] = []
 
@@ -1085,11 +1786,11 @@ ANDROID_VERSIONS = ["14.0.0", "13.0.0", "12.0.0", "12.0.0_64only", "11.0.0", "10
 def do_build(params: dict[str, Any]) -> None:
     global _build_status
     try:
-        script_dir = Path(settings.REDROID_SCRIPT_DIR)
+        script_dir = Path(settings.BUILD_SCRIPT_DIR)
         script_file = script_dir / "redroid.py"
         if not script_file.exists():
             candidates = [
-                Path("/opt/redroid-ui/redroid-script/redroid.py"),
+                Path("/opt/virtuale/redroid-script/redroid.py"),
                 Path("/opt/redroid-script/redroid.py"),
             ]
             for cand in candidates:
@@ -1099,12 +1800,12 @@ def do_build(params: dict[str, Any]) -> None:
                     break
         if not script_file.exists():
             raise RuntimeError(
-                "redroid.py não encontrado. Verifique o volume do redroid-script "
-                f"(esperado em {settings.REDROID_SCRIPT_DIR}/redroid.py)."
+                "redroid.py não encontrado. Verifique o volume do build-script "
+                f"(esperado em {settings.BUILD_SCRIPT_DIR}/redroid.py)."
             )
 
         args = [sys.executable, "redroid.py", "-a", params["android_version"]]
-        if settings.REDROID_USE_SUDO_DOCKER:
+        if settings.USE_SUDO_DOCKER:
             args += ["-c", "docker"]
         for flag, opt in [("gapps", "-g"), ("litegapps", "-lg"), ("mindthegapps", "-mtg"),
                           ("ndk", "-n"), ("houdini", "-i"), ("magisk", "-m"), ("widevine", "-w")]:
@@ -1114,9 +1815,9 @@ def do_build(params: dict[str, Any]) -> None:
         env = {**os.environ}
         env.setdefault("USER", "root")
         env.setdefault("HOME", "/root")
-        if settings.REDROID_USE_SUDO_DOCKER:
+        if settings.USE_SUDO_DOCKER:
             docker_exe = _docker_exe()
-            wrapper_dir = Path(tempfile.mkdtemp(prefix="redroid-ui-docker-wrapper-"))
+            wrapper_dir = Path(tempfile.mkdtemp(prefix="virtuale-docker-wrapper-"))
             wrapper = wrapper_dir / "docker"
             wrapper.write_text(f"#!/bin/sh\nexec sudo -n {docker_exe} \"$@\"\n")
             wrapper.chmod(0o755)
@@ -1196,17 +1897,17 @@ def start_build(params: dict[str, Any]) -> bool:
 # VPN (Alpine + OpenVPN sidecar) service
 # ---------------------------------------------------------------------------
 
-VPN_IMAGE = "redroid-ui/openvpn-client"
+VPN_IMAGE = "virtuale/openvpn-client"
 VPN_DOCKERFILE = """\
 FROM alpine:3.20
-RUN apk add --no-cache openvpn
+RUN apk add --no-cache openvpn iptables
 """
 
 # ---------------------------------------------------------------------------
 # Tor transparent-proxy sidecar (Whonix-like)
 # ---------------------------------------------------------------------------
 
-TOR_IMAGE = "redroid-ui/tor-client"
+TOR_IMAGE = "virtuale/tor-client"
 TOR_DOCKERFILE = """\
 FROM alpine:3.20
 RUN apk add --no-cache tor redsocks iptables
@@ -1235,17 +1936,17 @@ mkdir -p /var/lib/tor /run/tor
 chown -R tor:tor /var/lib/tor /run/tor
 chmod 700 /var/lib/tor /run/tor
 
+# Gateway mode: bind to 0.0.0.0 so forwarded traffic from the Android
+# container (separate network namespace) can reach TransPort/DNSPort.
 printf '%s\\n' \\
-    'SocksPort 127.0.0.1:9050' \\
-    'TransPort 127.0.0.1:9040' \\
-    'DNSPort 127.0.0.1:5353' \\
+    'SocksPort 0.0.0.0:9050' \\
+    'TransPort 0.0.0.0:9040' \\
+    'DNSPort 0.0.0.0:5353' \\
     'DataDirectory /var/lib/tor' \\
     'User tor' \\
     'Log notice stderr' > /etc/tor/torrc
 
 if [ -n "$COUNTRY" ]; then
-    # Best-effort country preference: avoids total egress lock when no exits
-    # are currently available for the selected country.
     printf 'ExitNodes {%s}\\nStrictNodes 0\\n' "$COUNTRY" >> /etc/tor/torrc
 fi
 
@@ -1262,40 +1963,240 @@ done
 nc -z 127.0.0.1 9050 2>/dev/null || { echo "Tor bootstrap timed out" >&2; exit 1; }
 sleep 3
 
-echo "Applying transparent proxy rules..."
-iptables -t nat -F OUTPUT 2>/dev/null || true
-iptables -t nat -A OUTPUT -d 127.0.0.0/8  -j RETURN
-iptables -t nat -A OUTPUT -d 10.0.0.0/8   -j RETURN
-iptables -t nat -A OUTPUT -d 172.16.0.0/12 -j RETURN
-iptables -t nat -A OUTPUT -d 192.168.0.0/16 -j RETURN
+echo "Applying gateway iptables rules (ip_forward via --sysctl)..."
+iptables -P FORWARD ACCEPT 2>/dev/null || true
 
-# Exclude all directly connected local subnets as seen inside this network
-# namespace. This preserves control-plane traffic (ADB/API/docker overlay)
-# even when Docker network ranges are non-RFC1918.
+# PREROUTING intercepts forwarded traffic from Android.
+# Private/local subnets are exempted so ADB/management passes through.
+iptables -t nat -A PREROUTING -d 127.0.0.0/8   -j RETURN
+iptables -t nat -A PREROUTING -d 10.0.0.0/8    -j RETURN
+iptables -t nat -A PREROUTING -d 172.16.0.0/12  -j RETURN
+iptables -t nat -A PREROUTING -d 192.168.0.0/16 -j RETURN
+
 for cidr in $(ip -o -4 route show scope link | awk '{print $1}' | sort -u); do
     [ -n "$cidr" ] || continue
-    iptables -t nat -A OUTPUT -d "$cidr" -j RETURN 2>/dev/null || true
+    iptables -t nat -A PREROUTING -d "$cidr" -j RETURN 2>/dev/null || true
 done
 
-# Prevent Tor's own outbound traffic from being intercepted.
-iptables -t nat -A OUTPUT -m owner --uid-owner tor -j RETURN 2>/dev/null \
-    || iptables -t nat -A OUTPUT -m owner --uid-owner 100 -j RETURN 2>/dev/null \
-    || true
-
-# Prefer REDIRECT; fallback to DNAT on kernels without REDIRECT support.
-if ! iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-ports 9040 2>/dev/null; then
-    echo "REDIRECT not available for TCP, falling back to DNAT 127.0.0.1:9040"
-    iptables -t nat -A OUTPUT -p tcp -j DNAT --to-destination 127.0.0.1:9040
+# Redirect forwarded TCP to Tor TransPort.
+MYIP=$(ip -4 addr show eth0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+if ! iptables -t nat -A PREROUTING -p tcp -j REDIRECT --to-ports 9040 2>/dev/null; then
+    iptables -t nat -A PREROUTING -p tcp -j DNAT --to-destination ${MYIP:-127.0.0.1}:9040
 fi
 
-if ! iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null; then
-    echo "REDIRECT not available for DNS, falling back to DNAT 127.0.0.1:5353"
-    iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination 127.0.0.1:5353
+# Redirect forwarded DNS to Tor DNSPort.
+if ! iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null; then
+    iptables -t nat -A PREROUTING -p udp --dport 53 -j DNAT --to-destination ${MYIP:-127.0.0.1}:5353
 fi
 
-echo "Tor transparent proxy active. country=${COUNTRY:-any}"
+echo "Tor gateway active. country=${COUNTRY:-any}"
 wait $TOR_PID
 """
+
+
+# ---------------------------------------------------------------------------
+# GPS fake
+# ---------------------------------------------------------------------------
+
+class GpsService:
+    @staticmethod
+    def set_location(serial: str, lat: float, lng: float) -> bool:
+        cmds = [
+            "settings put secure location_providers_allowed +gps",
+            "settings put secure location_providers_allowed +network",
+            f"appops set com.android.shell android:mock_location allow",
+            f"am start-foreground-service "
+            f"-a com.android.internal.location.action.MOCK_LOCATION "
+            f"--ef lat {lat} --ef lng {lng} 2>/dev/null; "
+            f"cmd location providers set-test-provider-enabled gps true 2>/dev/null; "
+            f"cmd location providers set-test-provider-location gps "
+            f"--latitude {lat} --longitude {lng} --altitude 10 --accuracy 1.0 2>/dev/null || true",
+        ]
+        ok = True
+        for c in cmds:
+            try:
+                _run(["adb", "-s", serial, "shell", c], timeout=8)
+            except Exception:
+                ok = False
+        return ok
+
+    @staticmethod
+    def clear_location(serial: str) -> bool:
+        cmds = [
+            "cmd location providers remove-test-provider gps 2>/dev/null || true",
+            "settings put secure location_providers_allowed -gps",
+        ]
+        for c in cmds:
+            try:
+                _run(["adb", "-s", serial, "shell", c], timeout=8)
+            except Exception:
+                pass
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Clipboard
+# ---------------------------------------------------------------------------
+
+class ClipboardService:
+    @staticmethod
+    def get_clipboard(serial: str) -> str:
+        try:
+            p = _run(["adb", "-s", serial, "shell",
+                       "service call clipboard 2 i32 1 i32 0 2>/dev/null | "
+                       "grep -oP \"'[^']*'\" | tr -d \"'\" | head -1"],
+                      timeout=8)
+            if p.returncode == 0 and p.stdout.strip():
+                return p.stdout.strip()
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def set_clipboard(serial: str, text: str) -> bool:
+        import shlex as _shlex
+        escaped = _shlex.quote(text)
+        try:
+            p = _run(["adb", "-s", serial, "shell",
+                       f"am broadcast -a clipper.set -e text {escaped} 2>/dev/null; "
+                       f"input text {escaped}; true"],
+                      timeout=8)
+            return p.returncode == 0
+        except Exception:
+            return False
+
+
+# ---------------------------------------------------------------------------
+# File management
+# ---------------------------------------------------------------------------
+
+class FileService:
+    @staticmethod
+    def push_file(serial: str, local_path: str, remote_path: str = "/sdcard/Download/") -> bool:
+        try:
+            p = _run(["adb", "-s", serial, "push", local_path, remote_path], timeout=120)
+            return p.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def pull_file(serial: str, remote_path: str, local_path: str) -> bool:
+        try:
+            p = _run(["adb", "-s", serial, "pull", remote_path, local_path], timeout=120)
+            return p.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def list_files(serial: str, remote_dir: str = "/sdcard/") -> list[dict]:
+        try:
+            p = _run(["adb", "-s", serial, "shell",
+                       f"ls -la {remote_dir} 2>/dev/null"],
+                      timeout=10)
+            if p.returncode != 0:
+                return []
+            entries = []
+            for line in (p.stdout or "").strip().splitlines():
+                parts = line.split(None, 7)
+                if len(parts) < 8:
+                    continue
+                entries.append({
+                    "permissions": parts[0],
+                    "size": parts[4] if len(parts) > 4 else "",
+                    "date": f"{parts[5]} {parts[6]}" if len(parts) > 6 else "",
+                    "name": parts[7] if len(parts) > 7 else parts[-1],
+                    "is_dir": parts[0].startswith("d"),
+                })
+            return entries
+        except Exception:
+            return []
+
+
+# ---------------------------------------------------------------------------
+# Backup / Restore
+# ---------------------------------------------------------------------------
+
+class BackupService:
+    @staticmethod
+    def export_instance(name: str, output_path: str) -> bool:
+        dc = _docker_cmd()
+        data_dir = Path(settings.DATA_ROOT) / name
+        try:
+            p = _run(dc + [
+                "run", "--rm",
+                "-v", f"{data_dir}:/mnt/data:ro",
+                "busybox",
+                "tar", "czf", "-", "-C", "/mnt/data", ".",
+            ], timeout=600)
+            if p.returncode == 0 and p.stdout:
+                Path(output_path).write_bytes(p.stdout.encode("latin-1") if isinstance(p.stdout, str) else p.stdout)
+                return True
+        except Exception as e:
+            logger.warning("BackupService.export: failed for %s: %s", name, e)
+        return False
+
+    @staticmethod
+    def export_instance_stream(name: str) -> subprocess.Popen | None:
+        dc = _docker_cmd()
+        data_dir = Path(settings.DATA_ROOT) / name
+        try:
+            proc = subprocess.Popen(
+                dc + [
+                    "run", "--rm",
+                    "-v", f"{data_dir}:/mnt/data:ro",
+                    "busybox",
+                    "tar", "czf", "-", "-C", "/mnt/data", ".",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            return proc
+        except Exception as e:
+            logger.warning("BackupService.export_stream: failed for %s: %s", name, e)
+            return None
+
+    @staticmethod
+    def import_instance(name: str, archive_path: str) -> bool:
+        dc = _docker_cmd()
+        data_dir = Path(settings.DATA_ROOT) / name
+        data_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(archive_path, "rb") as f:
+                p = subprocess.run(
+                    dc + [
+                        "run", "--rm", "-i",
+                        "-v", f"{data_dir}:/mnt/data",
+                        "busybox",
+                        "tar", "xzf", "-", "-C", "/mnt/data",
+                    ],
+                    stdin=f,
+                    capture_output=True,
+                    timeout=600,
+                )
+            return p.returncode == 0
+        except Exception as e:
+            logger.warning("BackupService.import: failed for %s: %s", name, e)
+            return False
+
+
+# ---------------------------------------------------------------------------
+# ADB Shell (interactive terminal)
+# ---------------------------------------------------------------------------
+
+class AdbShellService:
+    @staticmethod
+    def execute(serial: str, command: str, timeout: int = 15) -> dict:
+        try:
+            p = _run(["adb", "-s", serial, "shell", command], timeout=timeout)
+            return {
+                "stdout": (p.stdout or "").strip(),
+                "stderr": (p.stderr or "").strip(),
+                "returncode": p.returncode,
+            }
+        except subprocess.TimeoutExpired:
+            return {"stdout": "", "stderr": "Command timed out", "returncode": -1}
+        except Exception as e:
+            return {"stdout": "", "stderr": str(e), "returncode": -1}
 
 
 class VpnService:
@@ -1526,27 +2427,6 @@ class VpnService:
             )
 
     @staticmethod
-    def ensure_tor_image() -> None:
-        """Build the Alpine+Tor+redsocks image if it doesn't exist."""
-        dc = _docker_cmd()
-        p = _run(dc + ["image", "inspect", TOR_IMAGE])
-        if p.returncode == 0:
-            return
-        logger.info("VpnService: building %s image", TOR_IMAGE)
-        p = subprocess.run(
-            dc + ["build", "-t", TOR_IMAGE, "-"],
-            input=TOR_DOCKERFILE,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-        if p.returncode != 0:
-            raise RuntimeError(
-                f"Falha ao construir imagem Tor: {(p.stderr or p.stdout or '').strip()}"
-            )
-
-    @staticmethod
     def start_sidecar(
         name: str,
         vpn_type: str = "openvpn",
@@ -1574,14 +2454,13 @@ class VpnService:
         cmd = dc + [
             "run", "-d",
             "--name", sidecar,
-            "--label", "redroid-ui.managed=1",
-            "--label", "redroid-ui.role=vpn",
-            "--label", f"redroid-ui.parent={name}",
+            "--label", "virtuale.managed=1",
+            "--label", "virtuale.role=vpn",
+            "--label", f"virtuale.parent={name}",
             "--cap-add=NET_ADMIN",
             "--cap-add=NET_RAW",
+            "--sysctl", "net.ipv4.ip_forward=1",
             "-e", f"TOR_COUNTRY={country.strip()[:2].upper() if country else ''}",
-            # No tun device needed — Tor uses iptables REDIRECT, not tun0.
-            # Start on default bridge (has internet access to Tor network).
             TOR_IMAGE, "sh", "-c", TOR_STARTUP_SCRIPT,
         ]
         logger.info("_start_tor_sidecar: %s", " ".join(cmd))
@@ -1594,16 +2473,26 @@ class VpnService:
 
         VpnService._wait_running(name)
 
-        network = getattr(settings, "REDROID_DOCKER_NETWORK", "")
+        network = _get_network()
         if network:
-            p = _run(dc + ["network", "connect", network, sidecar], timeout=30)
-            if p.returncode != 0:
+            connected = False
+            last_err = ""
+            for attempt in range(3):
+                p = _run(dc + ["network", "connect", network, sidecar], timeout=30)
+                if p.returncode == 0:
+                    connected = True
+                    logger.info("_start_tor_sidecar: connected %s to %s", sidecar, network)
+                    break
+                last_err = (p.stderr or p.stdout or "").strip()
                 logger.warning(
-                    "_start_tor_sidecar: failed to connect %s to %s: %s",
-                    sidecar, network, (p.stderr or p.stdout or "").strip(),
+                    "_start_tor_sidecar: network connect attempt %d/3 failed for %s: %s",
+                    attempt + 1, sidecar, last_err,
                 )
-            else:
-                logger.info("_start_tor_sidecar: connected %s to %s", sidecar, network)
+                time.sleep(2 ** attempt)
+            if not connected:
+                raise RuntimeError(
+                    f"Falha ao conectar sidecar {sidecar} à rede {network}: {last_err}"
+                )
 
     @staticmethod
     def _start_openvpn_sidecar(
@@ -1656,32 +2545,56 @@ class VpnService:
         cmd = dc + [
             "run", "-d",
             "--name", sidecar,
-            "--label", "redroid-ui.managed=1",
-            "--label", "redroid-ui.role=vpn",
-            "--label", f"redroid-ui.parent={name}",
+            "--label", "virtuale.managed=1",
+            "--label", "virtuale.role=vpn",
+            "--label", f"virtuale.parent={name}",
             "--cap-add=NET_ADMIN",
+            "--cap-add=NET_RAW",
+            "--sysctl", "net.ipv4.ip_forward=1",
             "--device=/dev/net/tun",
         ]
         cmd += vol_flags
-        # Start on default bridge (has internet gateway).  The redroid-ui
-        # network is internal and has no internet access — OpenVPN would
-        # fail to reach the VPN server.
+        # Gateway mode: the sidecar runs in its OWN network namespace and
+        # acts as a router/gateway for the Android container (which also
+        # has its own namespace on the same Docker network).
         #
-        # We use a wrapper script that:
-        # 1) Saves the original default gateway before OpenVPN modifies it.
-        # 2) Starts OpenVPN in the background.
-        # 3) Runs a background route monitor that re-adds server routes
-        #    every 5 seconds (survives docker network connect disruptions).
-        # 4) Waits on the OpenVPN PID so the container stays alive.
+        # This avoids sharing the namespace with Android — Android's netd
+        # cannot interfere with the sidecar's routing/iptables.
+        #
+        # The wrapper:
+        # 1) Starts OpenVPN, waits for tun0.
+        # 2) Enables ip_forward so forwarded packets traverse the sidecar.
+        # 3) iptables FORWARD ACCEPT + MASQUERADE on tun0.
+        # 4) Maintenance loop keeps Docker routes alive.
         wrapper = (
             "GW=$(ip route | awk '/^default/{print $3}'); "
             "SIPS=$(grep -E '^remote ' " + vpn_path + "/custom.conf"
             " | awk '{print $2}'); "
+            "DOCKER_ROUTES=$(ip -o -4 route show scope link | awk '{print $1, $3}'); "
             "openvpn --cd " + vpn_path + " --config custom.conf --verb 3 & "
             "PID=$!; "
+
+            # Wait up to 60s for tun0
+            "T=0; while [ $T -lt 60 ]; do "
+            "  ip addr show tun0 2>/dev/null | grep -q 'inet ' && break; "
+            "  sleep 1; T=$((T+1)); "
+            "done; "
+
+            "VPN_GW=$(ip route | awk '/via.*dev tun0/{print $3; exit}'); "
+            "if [ -n \"$VPN_GW\" ]; then "
+            "  iptables -P FORWARD ACCEPT 2>/dev/null || true; "
+            "  iptables -t nat -A POSTROUTING -o tun0 -j MASQUERADE 2>/dev/null || true; "
+            "  echo 'VPN gateway active (FORWARD ACCEPT + MASQUERADE)'; "
+            "fi; "
+
+            # Background maintenance: keep VPN server and Docker routes alive
             "( while kill -0 $PID 2>/dev/null; do "
             "    for s in $SIPS; do "
             "      ip route replace $s/32 via $GW dev eth0 2>/dev/null || true; "
+            "    done; "
+            "    echo \"$DOCKER_ROUTES\" | while read cidr dev; do "
+            "      [ -n \"$cidr\" ] && [ -n \"$dev\" ] && [ \"$dev\" != tun0 ] && "
+            "        ip route replace $cidr dev $dev 2>/dev/null || true; "
             "    done; "
             "    sleep 5; "
             "  done "
@@ -1701,18 +2614,28 @@ class VpnService:
 
         VpnService._wait_running(name)
 
-        # Attach to the internal redroid network so the backend can reach
+        # Attach to the internal app network so the backend can reach
         # the sidecar by container name (for ADB, streaming, etc.).
-        network = getattr(settings, "REDROID_DOCKER_NETWORK", "")
+        network = _get_network()
         if network:
-            p = _run(dc + ["network", "connect", network, sidecar], timeout=30)
-            if p.returncode != 0:
+            connected = False
+            last_err = ""
+            for attempt in range(3):
+                p = _run(dc + ["network", "connect", network, sidecar], timeout=30)
+                if p.returncode == 0:
+                    connected = True
+                    logger.info("start_sidecar: connected %s to %s", sidecar, network)
+                    break
+                last_err = (p.stderr or p.stdout or "").strip()
                 logger.warning(
-                    "start_sidecar: failed to connect %s to %s: %s",
-                    sidecar, network, (p.stderr or p.stdout or "").strip(),
+                    "start_sidecar: network connect attempt %d/3 failed for %s: %s",
+                    attempt + 1, sidecar, last_err,
                 )
-            else:
-                logger.info("start_sidecar: connected %s to %s", sidecar, network)
+                time.sleep(2 ** attempt)
+            if not connected:
+                raise RuntimeError(
+                    f"Falha ao conectar sidecar {sidecar} à rede {network}: {last_err}"
+                )
 
     @staticmethod
     def _wait_running(name: str, timeout: int = 10) -> None:
@@ -1749,7 +2672,7 @@ class VpnService:
             if p.returncode != 0:
                 return False
             p2 = _run(
-                dc + ["exec", sidecar, "iptables", "-t", "nat", "-L", "OUTPUT", "-n"],
+                dc + ["exec", sidecar, "iptables", "-t", "nat", "-L", "PREROUTING", "-n"],
                 timeout=5,
             )
             out = p2.stdout or ""
@@ -1784,6 +2707,195 @@ class VpnService:
         return False
 
     @staticmethod
+    def sidecar_ip(name: str, retries: int = 3, delay: float = 2) -> str:
+        """Get the sidecar container's IP via ``docker inspect`` JSON output.
+
+        Prefers the IP on the configured/auto-detected app network; falls back
+        to any network with an IP.  Retries handle transient Docker state
+        inconsistencies right after ``docker network connect``.
+        """
+        dc = _docker_cmd()
+        sidecar = VpnService._sidecar_name(name)
+        network = _get_network()
+
+        for attempt in range(1, retries + 1):
+            p = _run(dc + ["inspect", sidecar], timeout=10)
+            if p.returncode == 0:
+                try:
+                    data = json.loads(p.stdout)
+                    if isinstance(data, list) and data:
+                        data = data[0]
+                    nets = (data.get("NetworkSettings") or {}).get("Networks") or {}
+                    # Prefer the app network
+                    if network and network in nets:
+                        ip = (nets[network].get("IPAddress") or "").strip()
+                        if ip:
+                            return ip
+                    # Fallback: first network with an IP (skip bridge)
+                    bridge_ip = ""
+                    for net_name, net_data in nets.items():
+                        ip = (net_data.get("IPAddress") or "").strip()
+                        if not ip:
+                            continue
+                        if net_name == "bridge":
+                            bridge_ip = ip
+                            continue
+                        return ip
+                    if bridge_ip:
+                        return bridge_ip
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
+
+            if attempt < retries:
+                logger.debug(
+                    "sidecar_ip: attempt %d/%d failed for %s, retrying in %.0fs",
+                    attempt, retries, sidecar, delay,
+                )
+                time.sleep(delay)
+            else:
+                logger.warning(
+                    "sidecar_ip: all %d attempts failed for %s (network=%s, "
+                    "last inspect rc=%d, stdout=%s, stderr=%s)",
+                    retries, sidecar, network or "<not set>",
+                    p.returncode,
+                    _short(p.stdout, 200),
+                    _short(p.stderr, 200),
+                )
+        return ""
+
+    @staticmethod
+    def _container_ip(name: str) -> str:
+        """Get a container's IP on the configured Docker network."""
+        dc = _docker_cmd()
+        network = _get_network()
+        p = _run(dc + ["inspect", name], timeout=10)
+        if p.returncode != 0:
+            return ""
+        try:
+            data = json.loads(p.stdout)
+            if isinstance(data, list) and data:
+                data = data[0]
+            nets = (data.get("NetworkSettings") or {}).get("Networks") or {}
+            if network and network in nets:
+                ip = (nets[network].get("IPAddress") or "").strip()
+                if ip:
+                    return ip
+            for net_data in nets.values():
+                ip = (net_data.get("IPAddress") or "").strip()
+                if ip:
+                    return ip
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+        return ""
+
+    @staticmethod
+    def setup_gateway(name: str) -> None:
+        """Redirect Android container's internet traffic through the sidecar.
+
+        Android's ``netd`` aggressively controls in-container routing via
+        fwmark policy rules and named tables — any ``ip route``/``ip rule``
+        or ``iptables mangle`` manipulation inside the Android namespace is
+        ignored or unsupported (``iptable_mangle`` not loaded).
+
+        Instead, we add **host-level** routing rules via a lightweight
+        ephemeral container with ``--network host``.  This works because
+        traffic from the Android container is *forwarded* through the
+        Docker bridge on the host kernel, where our ``ip rule`` is
+        evaluated **before** the packet ever reaches Android's netd.
+
+        Flow: Android → Docker bridge → host ip rule (from <android_ip>
+        table N) → sidecar → VPN/Tor tunnel → internet.
+        """
+        dc = _docker_cmd()
+        sidecar_ip = VpnService.sidecar_ip(name)
+        android_ip = VpnService._container_ip(name)
+        if not sidecar_ip or not android_ip:
+            logger.warning(
+                "setup_gateway: missing IPs for %s (sidecar=%s, android=%s)",
+                name, sidecar_ip, android_ip,
+            )
+            return
+
+        table_id = 1000 + int(android_ip.split(".")[-1])
+
+        host_script = (
+            f"set -e; "
+            # Clean previous rules for this instance
+            f"ip rule del from {android_ip} table {table_id} 2>/dev/null || true; "
+            f"ip route flush table {table_id} 2>/dev/null || true; "
+            # Exempt private/Docker subnets (use main table)
+            f"ip rule add from {android_ip} to 10.0.0.0/8 priority 99 table main 2>/dev/null || true; "
+            f"ip rule add from {android_ip} to 172.16.0.0/12 priority 99 table main 2>/dev/null || true; "
+            f"ip rule add from {android_ip} to 192.168.0.0/16 priority 99 table main 2>/dev/null || true; "
+            # All other traffic → sidecar
+            f"ip route add default via {sidecar_ip} table {table_id}; "
+            f"ip rule add from {android_ip} table {table_id} priority 100; "
+            f"echo 'host gateway: {android_ip} → {sidecar_ip} (table {table_id})'"
+        )
+
+        p = _run(
+            dc + [
+                "run", "--rm",
+                "--network", "host",
+                "--cap-add", "NET_ADMIN",
+                "alpine", "sh", "-c", host_script,
+            ],
+            timeout=30,
+        )
+        if p.returncode != 0:
+            logger.warning(
+                "setup_gateway: host routing failed for %s: %s",
+                name, (p.stderr or p.stdout or "").strip(),
+            )
+        else:
+            logger.info(
+                "setup_gateway: host route %s (%s) → sidecar %s, table %d",
+                name, android_ip, sidecar_ip, table_id,
+            )
+
+    @staticmethod
+    def cleanup_gateway(name: str) -> None:
+        """Remove host-level routing rules for a VPN instance."""
+        dc = _docker_cmd()
+        android_ip = VpnService._container_ip(name)
+        if not android_ip:
+            logger.debug("cleanup_gateway: cannot resolve IP for %s, skipping", name)
+            return
+
+        table_id = 1000 + int(android_ip.split(".")[-1])
+
+        cleanup_script = (
+            f"ip rule del from {android_ip} table {table_id} 2>/dev/null || true; "
+            f"ip rule del from {android_ip} to 10.0.0.0/8 priority 99 2>/dev/null || true; "
+            f"ip rule del from {android_ip} to 172.16.0.0/12 priority 99 2>/dev/null || true; "
+            f"ip rule del from {android_ip} to 192.168.0.0/16 priority 99 2>/dev/null || true; "
+            f"ip route flush table {table_id} 2>/dev/null || true; "
+            f"echo 'cleaned up gateway for {android_ip} (table {table_id})'"
+        )
+
+        p = _run(
+            dc + [
+                "run", "--rm",
+                "--network", "host",
+                "--cap-add", "NET_ADMIN",
+                "alpine", "sh", "-c", cleanup_script,
+            ],
+            timeout=15,
+        )
+        if p.returncode != 0:
+            logger.warning(
+                "cleanup_gateway: failed for %s: %s",
+                name, (p.stderr or p.stdout or "").strip(),
+            )
+
+    @staticmethod
+    def stop_sidecar(name: str) -> None:
+        VpnService.cleanup_gateway(name)
+        dc = _docker_cmd()
+        sidecar = VpnService._sidecar_name(name)
+        _run(dc + ["stop", sidecar], timeout=30)
+
+    @staticmethod
     def remove_sidecar(name: str) -> None:
         dc = _docker_cmd()
         sidecar = VpnService._sidecar_name(name)
@@ -1796,3 +2908,13 @@ class VpnService:
             return bool((data.get("State") or {}).get("Running"))
         except RuntimeError:
             return False
+
+
+def resolve_serial(instance) -> str:
+    """Resolve the ADB serial for an instance.
+
+    Prefers hostname-based serial (``name:5555``) because ``cmd_send_root``
+    extracts the container name from the serial for ``docker exec``.  Falls
+    back to IP resolution only when the hostname approach is not viable.
+    """
+    return instance.serial

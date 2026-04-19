@@ -2,6 +2,8 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useInstancesStore } from '../stores/instances'
+import VpnSettingsModal from './VpnSettingsModal.vue'
+import InstanceToolsModal from './InstanceToolsModal.vue'
 import JMuxer from 'jmuxer'
 import api from '../api'
 
@@ -14,6 +16,8 @@ const router = useRouter()
 const actionLoading = ref('')
 const apkInput = ref(null)
 const videoEl = ref(null)
+const showVpnModal = ref(false)
+const showToolsModal = ref(false)
 
 const connectionLabel = computed(() => {
   const s = (props.instance.connection_status || 'unknown').toLowerCase()
@@ -177,7 +181,7 @@ async function handleApk(event) {
         playsinline
       />
       <div v-if="!instance.running" class="phone-off">
-        <span class="off-icon">⏻</span>
+        <span class="off-icon">&#9211;</span>
         <span class="off-label">Desligado</span>
       </div>
     </div>
@@ -192,6 +196,12 @@ async function handleApk(event) {
       </span>
       <span v-if="instance.vpn_enabled" :class="['badge', vpnConnBadgeClass]" :title="`Status do túnel: ${instance.vpn_connection_status || 'unknown'}`">
         {{ vpnConnLabel }}
+      </span>
+      <span v-if="instance.device_profile" class="badge badge--profile" :title="`Perfil: ${instance.device_profile}`">
+        {{ instance.device_profile }}
+      </span>
+      <span v-if="instance.magisk_enabled" class="badge badge--magisk" title="Magisk root ativo">
+        Magisk
       </span>
     </div>
 
@@ -209,10 +219,19 @@ async function handleApk(event) {
         <span v-if="actionLoading === 'apk'" class="spinner" /> APK
         <input ref="apkInput" type="file" accept=".apk" hidden :disabled="!!actionLoading || !instance.running" @change="handleApk" />
       </label>
+      <button class="btn btn--small" :disabled="!!actionLoading" @click="showVpnModal = true" title="Configurar VPN / Tor">
+        &#128274; VPN
+      </button>
+      <button class="btn btn--small" :disabled="!!actionLoading" @click="showToolsModal = true" title="GPS, Clipboard, Arquivos, Backup, Terminal">
+        &#9881; Tools
+      </button>
       <button class="btn btn--small btn--danger" :disabled="!!actionLoading" @click="doAction('delete')">
-        <span v-if="actionLoading === 'delete'" class="spinner" /> ✕
+        <span v-if="actionLoading === 'delete'" class="spinner" /> &#10005;
       </button>
     </div>
+
+    <VpnSettingsModal v-if="showVpnModal" :instance="instance" @close="showVpnModal = false" />
+    <InstanceToolsModal v-if="showToolsModal" :instance="instance" @close="showToolsModal = false" />
   </div>
 </template>
 
@@ -221,24 +240,30 @@ async function handleApk(event) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  transition: transform var(--transition);
+}
+
+.phone-card:hover {
+  transform: translateY(-2px);
 }
 
 .phone-screen {
   width: 220px;
   height: 390px;
-  border-radius: 18px;
+  border-radius: 20px;
   overflow: hidden;
   background: #000;
-  border: 3px solid #333;
+  border: 2px solid var(--border-hover);
   cursor: pointer;
   position: relative;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-  transition: border-color var(--transition);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.2);
+  transition: border-color var(--transition), box-shadow var(--transition);
 }
 
 .phone-screen:hover {
   border-color: var(--accent);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 0 0 3px var(--accent-glow);
 }
 
 .phone-video {
@@ -261,21 +286,23 @@ async function handleApk(event) {
 
 .off-icon {
   font-size: 32px;
-  opacity: 0.4;
+  opacity: 0.3;
 }
 
 .off-label {
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 1px;
-  opacity: 0.5;
+  letter-spacing: 1.5px;
+  opacity: 0.4;
 }
 
 .phone-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   max-width: 220px;
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 .phone-name {
@@ -297,10 +324,47 @@ async function handleApk(event) {
 .apk-label { cursor: pointer; }
 .apk-label.disabled { opacity: 0.5; pointer-events: none; }
 
-.badge--vpn-on { background: #1e7a3a; color: #fff; }
-.badge--vpn-off { background: #6b4400; color: #fff; }
-.badge--vpn-warn { background: #8a5a00; color: #fff; }
-.badge--conn-up { background: #0f7a43; color: #fff; }
-.badge--conn-warn { background: #8a5a00; color: #fff; }
-.badge--conn-down { background: #6b2a2a; color: #fff; }
+.badge--vpn-on {
+  background: rgba(93, 186, 97, 0.14);
+  color: var(--success);
+}
+
+.badge--vpn-off {
+  background: rgba(139, 141, 144, 0.14);
+  color: var(--fg-muted);
+}
+
+.badge--vpn-warn {
+  background: rgba(232, 167, 62, 0.14);
+  color: var(--warning);
+}
+
+.badge--conn-up {
+  background: rgba(93, 186, 97, 0.14);
+  color: var(--success);
+}
+
+.badge--conn-warn {
+  background: rgba(232, 167, 62, 0.14);
+  color: var(--warning);
+}
+
+.badge--conn-down {
+  background: rgba(224, 82, 82, 0.14);
+  color: var(--danger);
+}
+
+.badge--profile {
+  background: rgba(130, 130, 220, 0.14);
+  color: var(--accent);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.badge--magisk {
+  background: rgba(50, 180, 130, 0.14);
+  color: #32b482;
+  font-size: 10px;
+  text-transform: uppercase;
+}
 </style>

@@ -16,14 +16,23 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import AccessToken
 from celery.result import AsyncResult
 
+from django.http import StreamingHttpResponse
+
 from .models import Instance
-from .serializers import CreateInstanceSerializer, InstanceSerializer, UpdateVpnSerializer
+from .serializers import CreateInstanceSerializer, InstanceSerializer, UpdateGpsSerializer, UpdateVpnSerializer
 from .services import (
     AdbService,
+    AdbShellService,
+    BackupService,
+    ClipboardService,
     DockerService,
+    FileService,
+    GpsService,
     TouchService,
     VpnService,
     cleanup_procs,
+    get_device_profiles,
+    resolve_serial,
 )
 from .tasks import create_instance_task, install_apk_task
 
@@ -52,7 +61,7 @@ class InstanceViewSet(viewsets.ModelViewSet):
             data["running"] = False
             data["status"] = "unknown"
         try:
-            data["connection_status"] = AdbService.connection_status(instance.serial)
+            data["connection_status"] = AdbService.connection_status(resolve_serial(instance))
         except Exception:
             data["connection_status"] = "unknown"
         if instance.vpn_enabled:
@@ -65,6 +74,10 @@ class InstanceViewSet(viewsets.ModelViewSet):
             data["vpn_active"] = False
             data["vpn_connection_status"] = "disabled"
         return data
+
+    @action(detail=False, methods=["get"], url_path="device-profiles")
+    def device_profiles(self, request):
+        return Response(get_device_profiles())
 
     def list(self, request, *args, **kwargs):
         qs = self.get_queryset()
@@ -92,6 +105,8 @@ class InstanceViewSet(viewsets.ModelViewSet):
             "image": d["image"],
             "gpu_mode": d["gpu_mode"],
             "extra_props": d.get("extra_props", ""),
+            "device_profile": d.get("device_profile", ""),
+            "magisk_enabled": d.get("magisk_enabled", False),
             "vpn_enabled": d.get("vpn_enabled", False),
             "vpn_type": d.get("vpn_type", "openvpn"),
             "vpn_provider": d.get("vpn_provider", "custom"),
@@ -100,6 +115,8 @@ class InstanceViewSet(viewsets.ModelViewSet):
             "vpn_username": d.get("vpn_username", ""),
             "vpn_password": d.get("vpn_password", ""),
             "vpn_country": d.get("vpn_country", ""),
+            "fake_lat": d.get("fake_lat"),
+            "fake_lng": d.get("fake_lng"),
         }
         try:
             task = create_instance_task.delay(user.id, payload)
@@ -119,7 +136,7 @@ class InstanceViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         warnings: list[str] = []
         try:
-            cleanup_procs(instance.serial)
+            cleanup_procs(resolve_serial(instance))
         except Exception:
             pass
         try:
@@ -159,12 +176,17 @@ class InstanceViewSet(viewsets.ModelViewSet):
                 )
                 VpnService.wait_tunnel(instance.name, timeout=60, vpn_type=instance.vpn_type)
             DockerService.start(instance.name)
+            if instance.vpn_enabled:
+                VpnService.setup_gateway(instance.name)
             TouchService.setup_virtual_touch(instance.name)
             TouchService.setup_virtual_keyboard(instance.name)
+            serial = resolve_serial(instance)
             try:
-                AdbService.connect(instance.serial)
-                if AdbService.wait_boot(instance.serial, 15):
-                    AdbService.dismiss_overlays(instance.serial)
+                AdbService.connect(serial)
+                if AdbService.wait_boot(serial, 15):
+                    AdbService.dismiss_overlays(serial)
+                    if instance.fake_lat is not None and instance.fake_lng is not None:
+                        GpsService.set_location(serial, instance.fake_lat, instance.fake_lng)
             except Exception as e:
                 logger.warning(
                     "start: instance %s started but ADB is not ready yet (%s)",
@@ -179,7 +201,7 @@ class InstanceViewSet(viewsets.ModelViewSet):
     def stop(self, request, pk=None):
         instance = self.get_object()
         try:
-            cleanup_procs(instance.serial)
+            cleanup_procs(resolve_serial(instance))
             DockerService.stop(instance.name)
             if instance.vpn_enabled:
                 VpnService.stop_sidecar(instance.name)
@@ -199,7 +221,7 @@ class InstanceViewSet(viewsets.ModelViewSet):
             suffix = ".apk"
         jobs_dir = Path(settings.DATA_ROOT) / "_jobs"
         jobs_dir.mkdir(parents=True, exist_ok=True)
-        tmp = jobs_dir / f"redroid-ui-{uuid.uuid4().hex}{suffix}"
+        tmp = jobs_dir / f"virtuale-{uuid.uuid4().hex}{suffix}"
         try:
             size = 0
             with tmp.open("wb") as out:
@@ -259,6 +281,167 @@ class InstanceViewSet(viewsets.ModelViewSet):
             "token": str(token),
         })
 
+    # ── GPS fake ──
+    @action(detail=True, methods=["put"], url_path="gps")
+    def update_gps(self, request, pk=None):
+        instance = self.get_object()
+        ser = UpdateGpsSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        d = ser.validated_data
+        lat = d.get("fake_lat")
+        lng = d.get("fake_lng")
+
+        instance.fake_lat = lat
+        instance.fake_lng = lng
+        instance.save(update_fields=["fake_lat", "fake_lng"])
+
+        if lat is not None and lng is not None:
+            serial = resolve_serial(instance)
+            try:
+                AdbService.connect(serial, retries=2, interval=2)
+                GpsService.set_location(serial, lat, lng)
+            except Exception as e:
+                logger.warning("update_gps: failed to set location for %s: %s", instance.name, e)
+        else:
+            serial = resolve_serial(instance)
+            try:
+                GpsService.clear_location(serial)
+            except Exception:
+                pass
+
+        return Response(self._enrich(instance))
+
+    # ── Clipboard ──
+    @action(detail=True, methods=["get"], url_path="clipboard")
+    def get_clipboard(self, request, pk=None):
+        instance = self.get_object()
+        serial = resolve_serial(instance)
+        text = ClipboardService.get_clipboard(serial)
+        return Response({"text": text})
+
+    @action(detail=True, methods=["post"], url_path="clipboard")
+    def set_clipboard(self, request, pk=None):
+        instance = self.get_object()
+        text = request.data.get("text", "")
+        serial = resolve_serial(instance)
+        ok = ClipboardService.set_clipboard(serial, text)
+        return Response({"status": "ok" if ok else "failed"})
+
+    # ── File management ──
+    @action(detail=True, methods=["get"], url_path="files")
+    def list_files(self, request, pk=None):
+        instance = self.get_object()
+        path = request.query_params.get("path", "/sdcard/")
+        serial = resolve_serial(instance)
+        entries = FileService.list_files(serial, path)
+        return Response({"path": path, "entries": entries})
+
+    @action(detail=True, methods=["post"], url_path="files/upload", parser_classes=[MultiPartParser])
+    def upload_file(self, request, pk=None):
+        instance = self.get_object()
+        f = request.FILES.get("file")
+        if not f:
+            return Response({"detail": "Nenhum arquivo enviado."}, status=status.HTTP_400_BAD_REQUEST)
+        remote_path = request.data.get("remote_path", "/sdcard/Download/")
+        jobs_dir = Path(settings.DATA_ROOT) / "_jobs"
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+        tmp = jobs_dir / f"upload-{uuid.uuid4().hex}-{f.name}"
+        try:
+            with tmp.open("wb") as out:
+                for chunk in f.chunks():
+                    out.write(chunk)
+            serial = resolve_serial(instance)
+            ok = FileService.push_file(serial, str(tmp), remote_path)
+            return Response({"status": "ok" if ok else "failed", "filename": f.name})
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    @action(detail=True, methods=["get"], url_path="files/download")
+    def download_file(self, request, pk=None):
+        instance = self.get_object()
+        remote_path = request.query_params.get("path", "")
+        if not remote_path:
+            return Response({"detail": "Parâmetro 'path' obrigatório."}, status=status.HTTP_400_BAD_REQUEST)
+        serial = resolve_serial(instance)
+        jobs_dir = Path(settings.DATA_ROOT) / "_jobs"
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+        tmp = jobs_dir / f"download-{uuid.uuid4().hex}"
+        try:
+            ok = FileService.pull_file(serial, remote_path, str(tmp))
+            if not ok or not tmp.exists():
+                return Response({"detail": "Falha ao baixar arquivo."}, status=status.HTTP_404_NOT_FOUND)
+            filename = remote_path.rsplit("/", 1)[-1] or "file"
+            resp = StreamingHttpResponse(
+                open(tmp, "rb"),
+                content_type="application/octet-stream",
+            )
+            resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return resp
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    # ── Backup / Restore ──
+    @action(detail=True, methods=["get"], url_path="backup")
+    def backup(self, request, pk=None):
+        instance = self.get_object()
+        proc = BackupService.export_instance_stream(instance.name)
+        if not proc or not proc.stdout:
+            return Response({"detail": "Falha ao gerar backup."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        def stream():
+            try:
+                while True:
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                proc.terminate()
+                proc.wait()
+
+        resp = StreamingHttpResponse(stream(), content_type="application/gzip")
+        resp["Content-Disposition"] = f'attachment; filename="{instance.name}-backup.tar.gz"'
+        return resp
+
+    @action(detail=True, methods=["post"], url_path="restore", parser_classes=[MultiPartParser])
+    def restore(self, request, pk=None):
+        instance = self.get_object()
+        f = request.FILES.get("file")
+        if not f:
+            return Response({"detail": "Arquivo de backup não enviado."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            is_running = DockerService.container_status(instance.name).get("running", False)
+        except Exception:
+            is_running = False
+        if is_running:
+            return Response({"detail": "Pare a instância antes de restaurar."}, status=status.HTTP_409_CONFLICT)
+
+        jobs_dir = Path(settings.DATA_ROOT) / "_jobs"
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+        tmp = jobs_dir / f"restore-{uuid.uuid4().hex}.tar.gz"
+        try:
+            with tmp.open("wb") as out:
+                for chunk in f.chunks():
+                    out.write(chunk)
+            ok = BackupService.import_instance(instance.name, str(tmp))
+            if not ok:
+                return Response({"detail": "Falha ao restaurar backup."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"status": "ok"})
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    # ── ADB Shell ──
+    @action(detail=True, methods=["post"], url_path="shell")
+    def adb_shell(self, request, pk=None):
+        instance = self.get_object()
+        command = request.data.get("command", "").strip()
+        if not command:
+            return Response({"detail": "Comando vazio."}, status=status.HTTP_400_BAD_REQUEST)
+        serial = resolve_serial(instance)
+        result = AdbShellService.execute(serial, command)
+        return Response(result)
+
     @action(detail=True, methods=["put"], url_path="vpn")
     def update_vpn(self, request, pk=None):
         instance = self.get_object()
@@ -266,6 +449,7 @@ class InstanceViewSet(viewsets.ModelViewSet):
         ser.is_valid(raise_exception=True)
         d = ser.validated_data
 
+        was_vpn_enabled = instance.vpn_enabled
         vpn_enabled = d.get("vpn_enabled", True)
         vpn_type = d.get("vpn_type", "openvpn")
         vpn_provider = d.get("vpn_provider", "custom")
@@ -273,6 +457,7 @@ class InstanceViewSet(viewsets.ModelViewSet):
         vpn_ca_cert = d.get("vpn_ca_cert", "")
         vpn_username = d.get("vpn_username", "")
         vpn_password = d.get("vpn_password", "")
+        vpn_country = d.get("vpn_country", "")
 
         if vpn_enabled and vpn_config.strip():
             VpnService.store_config(instance.name, vpn_config, vpn_username, vpn_password, ca_cert=vpn_ca_cert)
@@ -282,9 +467,46 @@ class InstanceViewSet(viewsets.ModelViewSet):
         instance.vpn_provider = vpn_provider
         instance.vpn_username = vpn_username
         instance.vpn_password = vpn_password
-        instance.save(update_fields=["vpn_enabled", "vpn_type", "vpn_provider", "vpn_username", "vpn_password"])
+        instance.vpn_country = vpn_country
+        instance.save(update_fields=[
+            "vpn_enabled", "vpn_type", "vpn_provider",
+            "vpn_username", "vpn_password", "vpn_country",
+        ])
 
-        if not vpn_enabled:
+        is_running = False
+        try:
+            is_running = DockerService.container_status(instance.name).get("running", False)
+        except Exception:
+            pass
+
+        if is_running:
+            if was_vpn_enabled:
+                try:
+                    VpnService.stop_sidecar(instance.name)
+                except Exception:
+                    logger.debug("update_vpn: stop_sidecar cleanup for %s (non-critical)", instance.name, exc_info=True)
+
+            if vpn_enabled:
+                try:
+                    VpnService.start_sidecar(
+                        instance.name,
+                        vpn_type=vpn_type,
+                        provider=vpn_provider,
+                        username=vpn_username,
+                        password=vpn_password,
+                        country=vpn_country,
+                    )
+                    VpnService.wait_tunnel(instance.name, timeout=60, vpn_type=vpn_type)
+                    VpnService.setup_gateway(instance.name)
+                except RuntimeError as e:
+                    logger.warning("update_vpn: sidecar restart failed for %s: %s", instance.name, e)
+                    return Response(
+                        {"detail": f"VPN salva mas falha ao ativar: {e}"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+            else:
+                VpnService.remove_config(instance.name)
+        elif not vpn_enabled:
             try:
                 VpnService.stop_sidecar(instance.name)
                 VpnService.remove_sidecar(instance.name)
@@ -299,14 +521,14 @@ class InstanceViewSet(viewsets.ModelViewSet):
         """Test if tap injection is working. Debug endpoint."""
         from .services import cmd_send_root
         instance = self.get_object()
+        serial = resolve_serial(instance)
         try:
-            # Try to tap center of screen (360, 640 in 720x1280 coordinates)
-            result = cmd_send_root(instance.serial, "input tap 360 640", timeout=5)
+            result = cmd_send_root(serial, "input tap 360 640", timeout=5)
             return Response({
                 "status": "ok" if result else "failed",
                 "message": "Tap command executed" if result else "Tap command failed - may still work",
                 "instance": instance.name,
-                "serial": instance.serial,
+                "serial": serial,
             })
         except Exception as e:
             logger.exception("test_tap failed for %s", instance.name)

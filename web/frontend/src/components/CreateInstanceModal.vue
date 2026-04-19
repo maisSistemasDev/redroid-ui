@@ -11,6 +11,9 @@ const androidVersion = ref('redroid/redroid:14.0.0-latest')
 const useCustomImage = ref(false)
 const customImage = ref('')
 const availableImages = ref([])
+const deviceProfile = ref('')
+const deviceProfiles = ref([])
+const magiskEnabled = ref(false)
 const vpnEnabled = ref(false)
 const vpnType = ref('openvpn')
 const vpnProvider = ref('custom')
@@ -89,6 +92,8 @@ async function handleSubmit() {
       name: name.value,
       image,
       gpu_mode: 'guest',
+      device_profile: deviceProfile.value,
+      magisk_enabled: magiskEnabled.value,
     }
     if (vpnEnabled.value) {
       payload.vpn_enabled = true
@@ -124,6 +129,15 @@ async function fetchImages() {
   }
 }
 
+async function fetchProfiles() {
+  try {
+    const { data } = await api.get('/instances/device-profiles/')
+    deviceProfiles.value = data || []
+  } catch {
+    deviceProfiles.value = []
+  }
+}
+
 function handleVpnFile(event) {
   const file = event.target.files?.[0]
   if (!file) return
@@ -142,12 +156,13 @@ function handleCaCertFile(event) {
 
 onMounted(() => {
   fetchImages()
+  fetchProfiles()
 })
 </script>
 
 <template>
   <div class="overlay" @click.self="emit('close')">
-    <div class="modal">
+    <div class="modal modal--create">
       <h2>Nova Instância</h2>
 
       <div v-if="error" class="error-msg">{{ error }}</div>
@@ -178,6 +193,23 @@ onMounted(() => {
             <option v-if="!availableImages.length" value="" disabled>Nenhuma imagem encontrada</option>
             <option v-for="img in availableImages" :key="img.id" :value="img.tag">{{ img.tag }}</option>
           </select>
+        </div>
+
+        <div class="form-group">
+          <label class="label" for="inst-profile">Perfil de dispositivo (spoof)</label>
+          <select id="inst-profile" v-model="deviceProfile" class="input">
+            <option value="">Nenhum (padrão AOSP)</option>
+            <option v-for="p in deviceProfiles" :key="p.value" :value="p.value">{{ p.label }}</option>
+          </select>
+          <small class="hint">Simula build props de um dispositivo real. Recomendado para apps que bloqueiam emuladores.</small>
+        </div>
+
+        <div class="form-group">
+          <label class="label checkline">
+            <input v-model="magiskEnabled" type="checkbox" />
+            Instalar Magisk (root + módulos)
+          </label>
+          <small class="hint">Magisk 25201 — habilita root, su, e suporte a módulos. Necessário para fake WiFi e outros patches.</small>
         </div>
 
         <div class="form-group">
@@ -253,5 +285,33 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.checkline { display: flex; align-items: center; gap: 8px; }
+.modal--create {
+  animation: modal-in 0.25s ease both;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.checkline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.hint {
+  display: block;
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+  line-height: 1.5;
+}
 </style>

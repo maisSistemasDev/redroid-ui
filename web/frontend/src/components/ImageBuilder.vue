@@ -149,7 +149,7 @@ onUnmounted(() => { clearTimeout(buildPollTimer); clearTimeout(spoofPollTimer) }
     <div class="card">
       <h3 class="subsection-title">Imagens Disponíveis</h3>
       <div v-if="imagesLoading" style="padding: 12px"><span class="spinner" /></div>
-      <div v-else-if="!images.length" class="empty-note">Nenhuma imagem redroid encontrada.</div>
+      <div v-else-if="!images.length" class="empty-note">Nenhuma imagem customizada encontrada.</div>
       <div v-else class="image-list">
         <div v-for="img in images" :key="img.id" class="image-row">
           <div class="image-info">
@@ -229,25 +229,114 @@ onUnmounted(() => { clearTimeout(buildPollTimer); clearTimeout(spoofPollTimer) }
 </template>
 
 <style scoped>
-.image-builder { display: flex; flex-direction: column; gap: 16px; }
-.subsection-title { font-size: 15px; font-weight: 600; color: var(--accent); margin-bottom: 12px; }
-.build-hint { font-size: 12px; color: var(--fg-muted); margin-bottom: 12px; }
-
-.build-form { display: flex; gap: 10px; align-items: center; }
-.build-form .input { flex: 1; min-width: 150px; }
-.check-opt { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-muted); }
-
-.image-list { display: flex; flex-direction: column; gap: 8px; }
-.image-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 10px 12px; background: var(--bg); border-radius: var(--radius); border: 1px solid var(--border);
+.image-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
-.image-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.image-tag { font-size: 13px; font-weight: 500; word-break: break-all; }
-.image-size { font-size: 12px; color: var(--fg-muted); }
-.empty-note { font-size: 13px; color: var(--fg-muted); padding: 8px 0; }
 
-.result-msg { padding: 10px 14px; border-radius: var(--radius); font-size: 13px; margin-bottom: 12px; }
-.result-success { background: rgba(102,187,106,0.1); border: 1px solid rgba(102,187,106,0.3); color: var(--success); }
-.result-error { background: rgba(239,83,80,0.1); border: 1px solid rgba(239,83,80,0.3); color: var(--danger); }
+.subsection-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 14px;
+}
+
+.build-hint {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-bottom: 14px;
+  line-height: 1.5;
+}
+
+.build-form {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.build-form .input {
+  flex: 1;
+  min-width: 150px;
+}
+
+.check-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: color var(--transition);
+}
+
+.check-opt:hover {
+  color: var(--fg);
+}
+
+.image-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.image-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  transition: border-color var(--transition);
+}
+
+.image-row:hover {
+  border-color: var(--border-hover);
+}
+
+.image-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.image-tag {
+  font-size: 13px;
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.image-size {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.empty-note {
+  font-size: 13px;
+  color: var(--fg-muted);
+  padding: 10px 0;
+}
+
+.result-msg {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.result-success {
+  background: rgba(93, 186, 97, 0.08);
+  border: 1px solid rgba(93, 186, 97, 0.25);
+  color: var(--success);
+}
+
+.result-error {
+  background: rgba(224, 82, 82, 0.08);
+  border: 1px solid rgba(224, 82, 82, 0.25);
+  color: var(--danger);
+}
 </style>

@@ -6,7 +6,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('instances', '0005_vpn_gluetun_fields'),
+        ('instances', '0005_vpn_extra_fields'),
         ('instances', '0005_vpn_type_provider'),
     ]
 

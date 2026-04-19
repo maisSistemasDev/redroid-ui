@@ -518,7 +518,7 @@ onUnmounted(() => {
       <button class="toolbar-btn" title="Voltar ao painel" @click="goBack">
         ← Painel
       </button>
-      <span class="toolbar-title">re-droid: #{{ instanceId }}</span>
+      <span class="toolbar-title">Virtuale: #{{ instanceId }}</span>
       <span class="toolbar-status">{{ statusText }}</span>
       <span class="toolbar-spacer" />
       <button class="toolbar-btn" title="Home" @click="sendKey(3)">Home</button>
@@ -598,29 +598,32 @@ onUnmounted(() => {
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  background: #111;
+  background: var(--bg);
   overflow: hidden;
 }
 
 .viewer-toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 16px;
-  background: var(--bg-elevated);
+  gap: 8px;
+  padding: 6px 14px;
+  background: var(--bg-surface);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   font-size: 13px;
+  overflow-x: auto;
 }
 
 .toolbar-title {
   font-weight: 600;
   color: var(--accent);
+  white-space: nowrap;
 }
 
 .toolbar-status {
-  opacity: 0.6;
+  color: var(--fg-muted);
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .toolbar-spacer {
@@ -628,19 +631,26 @@ onUnmounted(() => {
 }
 
 .toolbar-btn {
-  background: none;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: transparent;
+  border: 1px solid var(--border-hover);
   color: var(--fg);
-  padding: 3px 10px;
-  border-radius: 4px;
+  padding: 4px 10px;
+  border-radius: var(--radius);
   cursor: pointer;
   font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
   transition: all var(--transition);
 }
 
 .toolbar-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.toolbar-btn:active {
+  transform: scale(0.97);
 }
 
 .viewer-container {
@@ -682,28 +692,36 @@ onUnmounted(() => {
   position: absolute;
   inset: 0;
   color: var(--fg);
-  font-size: 16px;
-  opacity: 0.7;
+  font-size: 15px;
   z-index: 3;
-  background: rgba(0, 0, 0, 0.4);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
   pointer-events: none;
 }
 
 .clipboard-panel {
   display: flex;
   gap: 8px;
-  padding: 10px 16px;
+  padding: 8px 14px;
   border-top: 1px solid var(--border);
-  background: var(--bg-elevated);
+  background: var(--bg-surface);
 }
 
 .clipboard-input {
   flex: 1;
   background: var(--bg);
   color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  font-size: 13px;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.clipboard-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .hidden-input {

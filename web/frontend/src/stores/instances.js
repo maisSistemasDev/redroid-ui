@@ -158,6 +158,60 @@ export const useInstancesStore = defineStore('instances', () => {
     await fetchInstances()
   }
 
+  async function updateGps(id, payload) {
+    await api.put(`/instances/${id}/gps/`, payload)
+    await fetchInstances()
+  }
+
+  async function getClipboard(id) {
+    const { data } = await api.get(`/instances/${id}/clipboard/`)
+    return data?.text || ''
+  }
+
+  async function setClipboard(id, text) {
+    await api.post(`/instances/${id}/clipboard/`, { text })
+  }
+
+  async function listFiles(id, path = '/sdcard/') {
+    const { data } = await api.get(`/instances/${id}/files/`, { params: { path } })
+    return data
+  }
+
+  async function uploadFile(id, file, remotePath = '/sdcard/Download/') {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('remote_path', remotePath)
+    await api.post(`/instances/${id}/files/upload/`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 0,
+    })
+  }
+
+  async function downloadBackup(id, name) {
+    const { data } = await api.get(`/instances/${id}/backup/`, { responseType: 'blob', timeout: 0 })
+    const url = URL.createObjectURL(data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name}-backup.tar.gz`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  async function restoreBackup(id, file) {
+    const formData = new FormData()
+    formData.append('file', file)
+    await api.post(`/instances/${id}/restore/`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 0,
+    })
+    await fetchInstances()
+  }
+
+  async function adbShell(id, command) {
+    const { data } = await api.post(`/instances/${id}/shell/`, { command })
+    return data
+  }
+
   return {
     instances,
     loading,
@@ -169,5 +223,13 @@ export const useInstancesStore = defineStore('instances', () => {
     deleteInstance,
     installApk,
     updateVpn,
+    updateGps,
+    getClipboard,
+    setClipboard,
+    listFiles,
+    uploadFile,
+    downloadBackup,
+    restoreBackup,
+    adbShell,
   }
 })

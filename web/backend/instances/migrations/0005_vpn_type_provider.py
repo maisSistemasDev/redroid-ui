@@ -1,8 +1,7 @@
 from django.db import migrations, models
 
 
-def add_column_if_missing(apps, schema_editor):
-    """Add vpn_type and vpn_provider only if they don't already exist."""
+def add_columns_if_missing(apps, schema_editor):
     connection = schema_editor.connection
     with connection.cursor() as cursor:
         cursor.execute(
@@ -11,7 +10,8 @@ def add_column_if_missing(apps, schema_editor):
         )
         if not cursor.fetchone():
             cursor.execute(
-                "ALTER TABLE instances_instance ADD COLUMN vpn_type varchar(16) NOT NULL DEFAULT 'openvpn'"
+                "ALTER TABLE instances_instance "
+                "ADD COLUMN vpn_type varchar(16) NOT NULL DEFAULT 'openvpn'"
             )
         cursor.execute(
             "SELECT column_name FROM information_schema.columns "
@@ -19,7 +19,8 @@ def add_column_if_missing(apps, schema_editor):
         )
         if not cursor.fetchone():
             cursor.execute(
-                "ALTER TABLE instances_instance ADD COLUMN vpn_provider varchar(64) NOT NULL DEFAULT 'custom'"
+                "ALTER TABLE instances_instance "
+                "ADD COLUMN vpn_provider varchar(64) NOT NULL DEFAULT 'custom'"
             )
 
 
@@ -30,5 +31,25 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunPython(add_column_if_missing, migrations.RunPython.noop),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunPython(add_columns_if_missing, migrations.RunPython.noop),
+            ],
+            state_operations=[
+                migrations.AddField(
+                    model_name="instance",
+                    name="vpn_type",
+                    field=models.CharField(
+                        choices=[("openvpn", "OpenVPN"), ("wireguard", "WireGuard")],
+                        default="openvpn",
+                        max_length=16,
+                    ),
+                ),
+                migrations.AddField(
+                    model_name="instance",
+                    name="vpn_provider",
+                    field=models.CharField(blank=True, default="custom", max_length=64),
+                ),
+            ],
+        ),
     ]

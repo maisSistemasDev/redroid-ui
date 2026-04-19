@@ -8,8 +8,12 @@ class InstanceSerializer(serializers.ModelSerializer):
         model = Instance
         fields = [
             "id", "user", "name", "container_id",
-            "image", "gpu_mode", "extra_props",
-            "vpn_enabled", "vpn_type", "vpn_provider", "vpn_country", "created_at",
+            "image", "gpu_mode", "extra_props", "device_profile",
+            "magisk_enabled",
+            "vpn_enabled", "vpn_type", "vpn_provider", "vpn_country",
+            "vpn_username",
+            "fake_lat", "fake_lng",
+            "created_at",
         ]
         read_only_fields = ["id", "user", "container_id", "created_at"]
 
@@ -19,6 +23,8 @@ class CreateInstanceSerializer(serializers.Serializer):
     image = serializers.CharField(max_length=256, default="redroid/redroid:12.0.0_64only-latest")
     gpu_mode = serializers.CharField(max_length=16, default="guest")
     extra_props = serializers.CharField(required=False, default="", allow_blank=True)
+    device_profile = serializers.CharField(required=False, default="", allow_blank=True, max_length=32)
+    magisk_enabled = serializers.BooleanField(required=False, default=False)
     vpn_enabled = serializers.BooleanField(required=False, default=False)
     vpn_type = serializers.ChoiceField(choices=["openvpn", "tor", "wireguard"], required=False, default="openvpn")
     vpn_provider = serializers.CharField(required=False, default="custom", allow_blank=True, max_length=64)
@@ -27,6 +33,13 @@ class CreateInstanceSerializer(serializers.Serializer):
     vpn_username = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
     vpn_password = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
     vpn_country = serializers.CharField(required=False, default="", allow_blank=True, max_length=2)
+    fake_lat = serializers.FloatField(required=False, default=None, allow_null=True)
+    fake_lng = serializers.FloatField(required=False, default=None, allow_null=True)
+
+
+class UpdateGpsSerializer(serializers.Serializer):
+    fake_lat = serializers.FloatField(required=False, allow_null=True)
+    fake_lng = serializers.FloatField(required=False, allow_null=True)
 
 
 class UpdateVpnSerializer(serializers.Serializer):
