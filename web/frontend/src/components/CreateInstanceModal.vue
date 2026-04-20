@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useInstancesStore } from '../stores/instances'
 import api from '../api'
 
@@ -7,7 +7,8 @@ const emit = defineEmits(['close'])
 const store = useInstancesStore()
 
 const name = ref('')
-const androidVersion = ref('redroid/redroid:14.0.0-latest')
+const hostArch = ref('amd64')
+const androidVersion = ref('')
 const useCustomImage = ref(false)
 const customImage = ref('')
 const availableImages = ref([])
@@ -65,7 +66,7 @@ const vpnProviders = [
   { value: 'windscribe', label: 'Windscribe' },
 ]
 
-const versions = [
+const amd64Versions = [
   { value: 'redroid/redroid:14.0.0-latest', label: 'Android 14' },
   { value: 'redroid/redroid:13.0.0-latest', label: 'Android 13' },
   { value: 'redroid/redroid:12.0.0_64only-latest', label: 'Android 12 (64-bit)' },
@@ -75,6 +76,16 @@ const versions = [
   { value: 'redroid/redroid:9.0.0-latest', label: 'Android 9' },
   { value: 'redroid/redroid:8.1.0-latest', label: 'Android 8.1' },
 ]
+
+const arm64Versions = [
+  { value: 'redroid/redroid:14.0.0-arm64', label: 'Android 14' },
+  { value: 'redroid/redroid:13.0.0-arm64', label: 'Android 13' },
+  { value: 'redroid/redroid:12.0.0_64only-arm64', label: 'Android 12 (64-bit)' },
+  { value: 'redroid/redroid:12.0.0-arm64', label: 'Android 12' },
+  { value: 'redroid/redroid:11.0.0-arm64', label: 'Android 11' },
+]
+
+const versions = computed(() => hostArch.value === 'arm64' ? arm64Versions : amd64Versions)
 
 async function handleSubmit() {
   error.value = ''
@@ -121,6 +132,10 @@ async function fetchImages() {
   try {
     const { data } = await api.get('/images/')
     availableImages.value = data.images || []
+    if (data.arch) hostArch.value = data.arch
+    if (!androidVersion.value) {
+      androidVersion.value = versions.value[0]?.value || ''
+    }
     if (!customImage.value && availableImages.value.length) {
       customImage.value = availableImages.value[0].tag
     }

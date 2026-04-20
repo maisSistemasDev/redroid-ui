@@ -10,6 +10,7 @@ from instances.services import (
     ANDROID_VERSIONS,
     DockerService,
     get_build_status,
+    get_host_arch,
     get_spoof_status,
     start_build,
     start_spoof,
@@ -22,7 +23,7 @@ def list_images(request):
         images = DockerService.list_images()
     except RuntimeError as e:
         return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    return Response({"images": images})
+    return Response({"images": images, "arch": get_host_arch()})
 
 
 @api_view(["DELETE"])

@@ -4,8 +4,9 @@ import api from '../api'
 
 const images = ref([])
 const imagesLoading = ref(false)
+const hostArch = ref('amd64')
 
-const androidVersions = [
+const amd64AndroidVersions = [
   { value: '14.0.0', label: 'Android 14' },
   { value: '13.0.0', label: 'Android 13' },
   { value: '12.0.0', label: 'Android 12' },
@@ -15,6 +16,17 @@ const androidVersions = [
   { value: '9.0.0', label: 'Android 9' },
   { value: '8.1.0', label: 'Android 8.1' },
 ]
+
+const arm64AndroidVersions = [
+  { value: '14.0.0', label: 'Android 14' },
+  { value: '13.0.0', label: 'Android 13' },
+  { value: '12.0.0', label: 'Android 12' },
+  { value: '12.0.0_64only', label: 'Android 12 (64-bit)' },
+  { value: '11.0.0', label: 'Android 11' },
+]
+
+const androidVersions = computed(() => hostArch.value === 'arm64' ? arm64AndroidVersions : amd64AndroidVersions)
+const isArm64 = computed(() => hostArch.value === 'arm64')
 
 // MindTheGapps only supports 12+
 const mindthegappsVersions = new Set([
@@ -66,6 +78,7 @@ async function fetchImages() {
   try {
     const { data } = await api.get('/images/')
     images.value = data.images || []
+    if (data.arch) hostArch.value = data.arch
   } catch { /* noop */ }
   finally { imagesLoading.value = false }
 }
@@ -179,9 +192,9 @@ onUnmounted(() => { clearTimeout(buildPollTimer); clearTimeout(spoofPollTimer) }
         <select v-model="buildGappsVariant" class="input">
           <option v-for="opt in gappsOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
         </select>
-        <label class="check-opt">
-          <input v-model="buildHoudini" type="checkbox" />
-          Houdini
+        <label class="check-opt" :class="{ disabled: isArm64 }">
+          <input v-model="buildHoudini" type="checkbox" :disabled="isArm64" />
+          Houdini {{ isArm64 ? '(N/A em ARM64)' : '' }}
         </label>
         <label class="check-opt">
           <input v-model="buildAutoSpoof" type="checkbox" />

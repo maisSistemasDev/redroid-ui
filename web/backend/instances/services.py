@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -22,6 +23,24 @@ from typing import Any
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Architecture detection
+# ---------------------------------------------------------------------------
+
+def get_host_arch() -> str:
+    """Return normalised host CPU arch: 'amd64' or 'arm64'."""
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return "amd64"
+    if machine in ("aarch64", "arm64"):
+        return "arm64"
+    return machine
+
+
+def is_arm64() -> bool:
+    return get_host_arch() == "arm64"
 FORCE_DOCKER_INSTALL = (
     os.getenv("FORCE_DOCKER_INSTALL", os.getenv("REDROID_FORCE_DOCKER_INSTALL", "0"))
     .lower() in {"1", "true", "yes", "on"}
@@ -1146,8 +1165,10 @@ class MagiskService:
 
             magisk_bin_dir = tmpdir_p / "magisk_bin"
             magisk_bin_dir.mkdir()
+            abi = "arm64-v8a" if is_arm64() else "x86_64"
+            logger.info("apply_magisk: extracting binaries for ABI %s", abi)
             with zipfile.ZipFile(str(apk_path)) as zf:
-                for member in ("lib/x86_64/libmagisk64.so", "lib/x86_64/libbusybox.so"):
+                for member in (f"lib/{abi}/libmagisk64.so", f"lib/{abi}/libbusybox.so"):
                     data = zf.read(member)
                     out_name = "magisk" if "magisk64" in member else "busybox"
                     out_path = magisk_bin_dir / out_name
