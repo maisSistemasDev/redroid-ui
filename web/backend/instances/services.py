@@ -1206,48 +1206,29 @@ class MagiskService:
 # ---------------------------------------------------------------------------
 
 _COMMON_ANTI_DETECT = {
-    # --- Build type: look like a production device, not eng/userdebug ---
+    # Build identity: production device, not eng/userdebug
     "ro.build.tags": "release-keys",
     "ro.build.type": "user",
-    "ro.build.flavor": "user",
 
-    # --- Verified boot: pretend bootloader is locked & verified ---
+    # Verified boot
     "ro.boot.verifiedbootstate": "green",
     "ro.boot.flash.locked": "1",
     "ro.boot.vbmeta.device_state": "locked",
     "ro.boot.veritymode": "enforcing",
 
-    # --- Security patch level ---
+    # Security patch level
     "ro.build.version.security_patch": "2025-03-05",
     "ro.vendor.build.security_patch": "2025-03-05",
 
-    # --- Anti-emulator: remove qemu/goldfish/ranchu markers ---
-    "ro.kernel.qemu": "0",
-    "ro.kernel.qemu.gles": "0",
-    "ro.hardware.chipname": "exynos990",
-    "ro.board.platform": "universal",
+    # Boot revision (cosmetic, safe)
     "ro.boot.hardware.revision": "MP1.0",
 
-    # --- API level: pretend shipped with this Android version ---
-    "ro.product.first_api_level": "33",
-
-    # --- SELinux: enforcing like production devices ---
-    "ro.build.selinux": "1",
-
-    # --- Network: pretend WiFi is real ---
-    "ro.hardware.wifi": "qcom",
-    "wifi.interface": "wlan0",
-
-    # --- Telephony: basic phone identity ---
+    # Telephony
     "ro.telephony.default_network": "9",
     "gsm.version.baseband": "1.0",
     "gsm.version.ril-impl": "android qualcomm RIL 1.0",
 
-    # --- GL / GPU: look like real mobile GPU ---
-    "ro.opengles.version": "196610",
-    "ro.hardware.egl": "mali",
-
-    # --- Misc anti-fingerprinting ---
+    # Misc anti-fingerprinting
     "ro.setupwizard.mode": "OPTIONAL",
     "ro.com.google.gmsversion": "14_202408",
     "persist.sys.timezone": "America/Sao_Paulo",
@@ -1256,6 +1237,18 @@ _COMMON_ANTI_DETECT = {
     "ro.boot.warranty_bit": "0",
     "ro.warranty_bit": "0",
     "ro.is_ever_orange": "0",
+
+    # NOTE: These properties are intentionally NOT set here because
+    # Redroid relies on its own values to boot correctly:
+    #   ro.kernel.qemu        - Redroid needs its internal value
+    #   ro.hardware.egl       - must match actual GPU (swiftshader/mesa)
+    #   ro.hardware.chipname  - breaks hardware init
+    #   ro.board.platform     - breaks hardware init
+    #   ro.opengles.version   - must match actual GL capability
+    #   ro.build.selinux      - breaks userdebug boot
+    #   ro.build.flavor       - breaks userdebug boot
+    #   ro.hardware.wifi      - no real wifi hw in container
+    #   wifi.interface        - no wlan0 device exists
 }
 
 DEVICE_PROFILES: dict[str, dict[str, str]] = {
@@ -1266,7 +1259,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.product.model": "Pixel 6",
         "ro.product.device": "oriole",
         "ro.product.name": "oriole",
-        "ro.hardware": "oriole",
         "ro.build.display.id": "AP2A.240805.005",
         "ro.build.id": "AP2A.240805.005",
         "ro.build.fingerprint": "google/oriole/oriole:14/AP2A.240805.005/12025142:user/release-keys",
@@ -1274,11 +1266,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.build.description": "oriole-user 14 AP2A.240805.005 12025142 release-keys",
         "ro.product.first_api_level": "31",
         "ro.product.board": "oriole",
-        "ro.board.platform": "gs101",
-        "ro.hardware.chipname": "gs101",
-        "ro.hardware.egl": "mali",
-        "ro.hardware.wifi": "bcmdhd",
-        "ro.com.google.clientidbase": "android-google",
         "ro.soc.manufacturer": "Google",
         "ro.soc.model": "Tensor",
         **_COMMON_ANTI_DETECT,
@@ -1290,7 +1277,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.product.model": "Pixel 7",
         "ro.product.device": "panther",
         "ro.product.name": "panther",
-        "ro.hardware": "panther",
         "ro.build.display.id": "AP2A.240805.005",
         "ro.build.id": "AP2A.240805.005",
         "ro.build.fingerprint": "google/panther/panther:14/AP2A.240805.005/12025142:user/release-keys",
@@ -1298,11 +1284,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.build.description": "panther-user 14 AP2A.240805.005 12025142 release-keys",
         "ro.product.first_api_level": "33",
         "ro.product.board": "panther",
-        "ro.board.platform": "gs201",
-        "ro.hardware.chipname": "gs201",
-        "ro.hardware.egl": "mali",
-        "ro.hardware.wifi": "bcmdhd",
-        "ro.com.google.clientidbase": "android-google",
         "ro.soc.manufacturer": "Google",
         "ro.soc.model": "Tensor G2",
         **_COMMON_ANTI_DETECT,
@@ -1314,7 +1295,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.product.model": "Pixel 8",
         "ro.product.device": "shiba",
         "ro.product.name": "shiba",
-        "ro.hardware": "shiba",
         "ro.build.display.id": "AP2A.240805.005",
         "ro.build.id": "AP2A.240805.005",
         "ro.build.fingerprint": "google/shiba/shiba:14/AP2A.240805.005/12025142:user/release-keys",
@@ -1322,11 +1302,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.build.description": "shiba-user 14 AP2A.240805.005 12025142 release-keys",
         "ro.product.first_api_level": "34",
         "ro.product.board": "shiba",
-        "ro.board.platform": "zuma",
-        "ro.hardware.chipname": "zuma",
-        "ro.hardware.egl": "mali",
-        "ro.hardware.wifi": "bcmdhd",
-        "ro.com.google.clientidbase": "android-google",
         "ro.soc.manufacturer": "Google",
         "ro.soc.model": "Tensor G3",
         **_COMMON_ANTI_DETECT,
@@ -1338,7 +1313,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.product.model": "SM-S911B",
         "ro.product.device": "dm1q",
         "ro.product.name": "dm1qxxx",
-        "ro.hardware": "qcom",
         "ro.build.display.id": "TP1A.220624.014.S911BXXS7CXF3",
         "ro.build.id": "TP1A.220624.014",
         "ro.build.fingerprint": "samsung/dm1qxxx/dm1q:14/TP1A.220624.014/S911BXXS7CXF3:user/release-keys",
@@ -1346,11 +1320,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.build.description": "dm1qxxx-user 14 TP1A.220624.014 S911BXXS7CXF3 release-keys",
         "ro.product.first_api_level": "33",
         "ro.product.board": "kalama",
-        "ro.board.platform": "kalama",
-        "ro.hardware.chipname": "sm8550",
-        "ro.hardware.egl": "adreno",
-        "ro.hardware.wifi": "qcom",
-        "ro.com.google.clientidbase": "android-samsung-ss",
         "ro.soc.manufacturer": "Qualcomm",
         "ro.soc.model": "SM8550",
         **_COMMON_ANTI_DETECT,
@@ -1362,7 +1331,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.product.model": "SM-S921B",
         "ro.product.device": "e1q",
         "ro.product.name": "e1qxxx",
-        "ro.hardware": "qcom",
         "ro.build.display.id": "UP1A.231005.007.S921BXXS3AXE2",
         "ro.build.id": "UP1A.231005.007",
         "ro.build.fingerprint": "samsung/e1qxxx/e1q:14/UP1A.231005.007/S921BXXS3AXE2:user/release-keys",
@@ -1370,11 +1338,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.build.description": "e1qxxx-user 14 UP1A.231005.007 S921BXXS3AXE2 release-keys",
         "ro.product.first_api_level": "34",
         "ro.product.board": "sun",
-        "ro.board.platform": "sun",
-        "ro.hardware.chipname": "s5e9945",
-        "ro.hardware.egl": "mali",
-        "ro.hardware.wifi": "bcmdhd",
-        "ro.com.google.clientidbase": "android-samsung-ss",
         "ro.soc.manufacturer": "Samsung",
         "ro.soc.model": "s5e9945",
         **_COMMON_ANTI_DETECT,
@@ -1386,7 +1349,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.product.model": "SM-A546B",
         "ro.product.device": "a54x",
         "ro.product.name": "a54xnsxx",
-        "ro.hardware": "exynos",
         "ro.build.display.id": "UP1A.231005.007.A546BXXS9CXE2",
         "ro.build.id": "UP1A.231005.007",
         "ro.build.fingerprint": "samsung/a54xnsxx/a54x:14/UP1A.231005.007/A546BXXS9CXE2:user/release-keys",
@@ -1394,11 +1356,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.build.description": "a54xnsxx-user 14 UP1A.231005.007 A546BXXS9CXE2 release-keys",
         "ro.product.first_api_level": "33",
         "ro.product.board": "s5e8835",
-        "ro.board.platform": "universal8835",
-        "ro.hardware.chipname": "s5e8835",
-        "ro.hardware.egl": "mali",
-        "ro.hardware.wifi": "bcmdhd",
-        "ro.com.google.clientidbase": "android-samsung-ss",
         "ro.soc.manufacturer": "Samsung",
         "ro.soc.model": "Exynos 1380",
         **_COMMON_ANTI_DETECT,
@@ -1410,7 +1367,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.product.model": "23127PN0CC",
         "ro.product.device": "houji",
         "ro.product.name": "houji",
-        "ro.hardware": "qcom",
         "ro.build.display.id": "UKQ1.231003.002",
         "ro.build.id": "UKQ1.231003.002",
         "ro.build.fingerprint": "Xiaomi/houji/houji:14/UKQ1.231003.002/V816.0.9.0.UNCCNXM:user/release-keys",
@@ -1418,11 +1374,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.build.description": "houji-user 14 UKQ1.231003.002 V816.0.9.0.UNCCNXM release-keys",
         "ro.product.first_api_level": "34",
         "ro.product.board": "kalama",
-        "ro.board.platform": "kalama",
-        "ro.hardware.chipname": "sm8650",
-        "ro.hardware.egl": "adreno",
-        "ro.hardware.wifi": "qcom",
-        "ro.com.google.clientidbase": "android-xiaomi",
         "ro.soc.manufacturer": "Qualcomm",
         "ro.soc.model": "SM8650",
         **_COMMON_ANTI_DETECT,
@@ -1434,7 +1385,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.product.model": "CPH2583",
         "ro.product.device": "aston",
         "ro.product.name": "aston",
-        "ro.hardware": "qcom",
         "ro.build.display.id": "CPH2583_14.0.0.800",
         "ro.build.id": "UP1A.231005.007",
         "ro.build.fingerprint": "OnePlus/aston/aston:14/UP1A.231005.007/T.18c3716_11551:user/release-keys",
@@ -1442,11 +1392,6 @@ DEVICE_PROFILES: dict[str, dict[str, str]] = {
         "ro.build.description": "aston-user 14 UP1A.231005.007 T.18c3716_11551 release-keys",
         "ro.product.first_api_level": "34",
         "ro.product.board": "kalama",
-        "ro.board.platform": "kalama",
-        "ro.hardware.chipname": "sm8650",
-        "ro.hardware.egl": "adreno",
-        "ro.hardware.wifi": "qcom",
-        "ro.com.google.clientidbase": "android-oneplus",
         "ro.soc.manufacturer": "Qualcomm",
         "ro.soc.model": "SM8650",
         **_COMMON_ANTI_DETECT,
@@ -1515,9 +1460,20 @@ def _patch_build_prop_with_profile(content: str, profile_key: str) -> str:
         if pname:
             replacements[f"{pfx}.name"] = pname
 
-    skip_keys = {"label"}
+    # Keys that must NEVER be overwritten — Redroid needs its own values
+    # for these to boot and render correctly.
+    _protected = {
+        "label",
+        "ro.hardware", "ro.hardware.egl", "ro.hardware.gralloc",
+        "ro.hardware.hwcomposer", "ro.hardware.vulkan",
+        "ro.hardware.chipname", "ro.hardware.wifi",
+        "ro.board.platform", "ro.kernel.qemu", "ro.kernel.qemu.gles",
+        "ro.opengles.version", "ro.build.selinux", "ro.build.flavor",
+        "ro.debuggable", "ro.secure", "ro.adb.secure",
+        "wifi.interface",
+    }
     for key, val in profile.items():
-        if key not in skip_keys and key not in replacements and "." in key:
+        if key not in _protected and key not in replacements and "." in key:
             replacements[key] = val
 
     lines = content.splitlines(keepends=True)
