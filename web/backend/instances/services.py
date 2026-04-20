@@ -1084,6 +1084,14 @@ rm -rf $tmpPushed
 mkdir $tmpPushed
 tar -xf /magisk.tar --no-same-owner -C $tmpPushed
 umount /magisk.tar ; rm -f /magisk.tar
+
+# Remove ALL pre-existing su binaries to avoid "Abnormal State" error.
+# Redroid userdebug images ship their own su that conflicts with Magisk.
+rm -f /system/xbin/su /system/bin/su /system/bin/.ext/.su \
+      /product/bin/su /vendor/bin/su /odm/bin/su \
+      /system/xbin/daemonsu /system/bin/daemonsu \
+      /sbin/su 2>/dev/null
+
 mkdir -p /sbin
 chown root:root /sbin
 chmod 0751 /sbin
@@ -1177,6 +1185,11 @@ class MagiskService:
                 ok = _docker_cp_write(tmp_name, "", "magisk.tar", tar_content, mode=0o700)
                 if not ok:
                     raise RuntimeError("Failed to copy magisk.tar")
+
+                # Replace stock su binaries with symlinks to Magisk's su.
+                # Redroid userdebug ships its own su in /system/xbin/su
+                # which triggers Magisk's "Abnormal State" detection.
+                _replace_stock_su(tmp_name)
 
                 p = _run(dc + ["commit", tmp_name, new_tag], timeout=300)
                 if p.returncode != 0:
@@ -1683,6 +1696,35 @@ def _docker_cp_read(container: str, path: str) -> bytes | None:
         return member.read() if member else None
     except Exception:
         return None
+
+
+def _replace_stock_su(container: str) -> None:
+    """Overwrite stock su binaries inside a stopped container with symlinks
+    pointing to /sbin/magisk, so Magisk doesn't see a competing su."""
+    dc = _docker_cmd()
+    su_paths = [
+        ("system/xbin", "su"),
+        ("system/bin", "su"),
+        ("product/bin", "su"),
+        ("vendor/bin", "su"),
+    ]
+    for dest_dir, name in su_paths:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=name)
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/sbin/magisk"
+            info.mode = 0o755
+            tar.addfile(info)
+        dest = f"/{dest_dir}/"
+        p = subprocess.run(
+            dc + ["cp", "-", f"{container}:{dest}"],
+            input=buf.getvalue(), capture_output=True, timeout=30,
+        )
+        if p.returncode == 0:
+            logger.info("_replace_stock_su: replaced %s/%s -> /sbin/magisk", dest_dir, name)
+        else:
+            logger.debug("_replace_stock_su: %s/%s not found or failed (ok)", dest_dir, name)
 
 
 def _docker_cp_write(container: str, dest_dir: str, filename: str, data: bytes, mode: int = 0o644) -> bool:
