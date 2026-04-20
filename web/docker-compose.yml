@@ -43,7 +43,7 @@ services:
       DATA_ROOT: /data/instances
       DATA_VOLUME: virtuale_instance_data
       USE_SUDO_DOCKER: "0"
-      DOCKER_NETWORK: virtuale_default
+      DOCKER_NETWORK: web_default
       FORCE_ADB_INPUT: "1"
       STREAM_SIZE: "480x854"
       STREAM_BITRATE: "1800000"
@@ -74,7 +74,7 @@ services:
       DATA_ROOT: /data/instances
       DATA_VOLUME: virtuale_instance_data
       USE_SUDO_DOCKER: "0"
-      DOCKER_NETWORK: virtuale_default
+      DOCKER_NETWORK: web_default
       FORCE_ADB_INPUT: "1"
     depends_on:
       db:
