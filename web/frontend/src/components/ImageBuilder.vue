@@ -6,7 +6,7 @@ const images = ref([])
 const imagesLoading = ref(false)
 const hostArch = ref('amd64')
 
-const amd64AndroidVersions = [
+const androidVersions = [
   { value: '14.0.0', label: 'Android 14' },
   { value: '13.0.0', label: 'Android 13' },
   { value: '12.0.0', label: 'Android 12' },
@@ -17,15 +17,6 @@ const amd64AndroidVersions = [
   { value: '8.1.0', label: 'Android 8.1' },
 ]
 
-const arm64AndroidVersions = [
-  { value: '14.0.0', label: 'Android 14' },
-  { value: '13.0.0', label: 'Android 13' },
-  { value: '12.0.0', label: 'Android 12' },
-  { value: '12.0.0_64only', label: 'Android 12 (64-bit)' },
-  { value: '11.0.0', label: 'Android 11' },
-]
-
-const androidVersions = computed(() => hostArch.value === 'arm64' ? arm64AndroidVersions : amd64AndroidVersions)
 const isArm64 = computed(() => hostArch.value === 'arm64')
 
 // MindTheGapps only supports 12+
