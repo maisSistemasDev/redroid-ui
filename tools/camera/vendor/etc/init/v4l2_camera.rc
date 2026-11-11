@@ -1,0 +1,7 @@
+# Patch linker namespaces so camera.v4l2.so (bind-mounted in /vendor) can load /system/lib64 deps.
+# See: remote-android/redroid-doc issues #14, #574 and community V4L2 bind-mount guides.
+
+# Prefer HAL bind-mount em /system/lib64/hw/ (redroid-ui). Este .rc só ajuda se estiver
+# dentro da imagem vendor (bind-mount de .rc é ignorado no Android 12+).
+on property:init.svc.apexd=running
+    exec -- /system/bin/sh -c "for f in /linkerconfig/ld.config.txt /linkerconfig/default/ld.config.txt /linkerconfig/apex/ld.config.txt; do if [ -f \"$f\" ]; then sed -i 's|\([A-Za-z0-9_.-]*\.[A-Za-z0-9_.-]*\) = /vendor/|\1 = /system/lib64:/vendor/|g' \"$f\"; fi; done"

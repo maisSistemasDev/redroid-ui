@@ -1,6 +1,40 @@
+# App Electron (raiz) — não versionado
+/electron/
+/src/
+/package.json
+/package-lock.json
+
+# Node
 node_modules/
-python/.venv/
-python/__pycache__/
+
+# Python
+__pycache__/
 *.pyc
+.venv/
+venv/
+python/env
+
+# Ambiente / segredos
+.env
+!.env.example
+
+# Banco local
+*.sqlite3
+
+# Sistema
 .DS_Store
 redroid-script/
+
+# Binários compilados (fontes .c permanecem versionadas)
+tools/camera/vendor/**/*.so
+tools/camera/vendor/**/hw/android.hardware.camera.provider@2.4-service*
+/tools/create_touch
+/tools/init_wrapper
+/tools/touch_inject
+/tools/touch_inject_dbg
+/web/tools/create_keyboard
+/web/tools/create_touch
+/web/tools/init_wrapper
+/web/tools/redsocks
+/web/tools/touch_inject
+/web/tools/touch_inject_dbg

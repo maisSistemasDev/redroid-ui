@@ -82,15 +82,15 @@ services:
       redis:
         condition: service_healthy
 
-  frontend:
-    build:
-      context: frontend
-      dockerfile: Dockerfile
-    container_name: virtuale-fe
-    ports:
-      - "8080:80"
-    depends_on:
-      - api
+  #frontend:
+  #  build:
+  #    context: frontend
+  #    dockerfile: Dockerfile
+  #  container_name: virtuale-fe
+  #  ports:
+  #    - "8080:80"
+  #  depends_on:
+  #    - api
 
 volumes:
   pgdata:

@@ -321,17 +321,22 @@ class DockerService:
     def list_images() -> list[dict[str, str]]:
         sep = "|||"
         fmt = sep.join(["{{.Repository}}:{{.Tag}}", "{{.ID}}", "{{.Size}}"])
-        p = _run(_docker_cmd() + ["images", "--format", fmt, "--filter", "reference=redroid/*"])
-        if p.returncode != 0:
-            raise RuntimeError((p.stderr or "").strip())
+        seen: set[str] = set()
         images: list[dict[str, str]] = []
-        for line in p.stdout.strip().splitlines():
-            parts = line.split(sep)
-            if len(parts) >= 3:
-                tag = parts[0].strip()
-                if "<none>" in tag:
+        for ref in ("redroid/*", "redroid:*"):
+            p = _run(_docker_cmd() + ["images", "--format", fmt, "--filter", f"reference={ref}"])
+            if p.returncode != 0:
+                raise RuntimeError((p.stderr or "").strip())
+            for line in p.stdout.strip().splitlines():
+                parts = line.split(sep)
+                if len(parts) < 3:
                     continue
+                tag = parts[0].strip()
+                if "<none>" in tag or tag in seen:
+                    continue
+                seen.add(tag)
                 images.append({"tag": tag, "id": parts[1].strip(), "size": parts[2].strip()})
+        images.sort(key=lambda row: (0 if row["tag"] == "redroid:12-camera" else 1, row["tag"]))
         return images
 
     @staticmethod

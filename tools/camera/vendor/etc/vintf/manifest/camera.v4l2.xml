@@ -1,0 +1,16 @@
+<!--
+  Fragment mounted at /vendor/etc/vintf/manifest/camera.v4l2.xml
+  Declares legacy Camera Provider (HIDL 2.4) for camera.v4l2 HAL.
+-->
+<manifest version="4.0" type="device">
+    <hal format="hidl">
+        <name>android.hardware.camera.provider</name>
+        <transport>hwbinder</transport>
+        <version>2.4</version>
+        <interface>
+            <name>ICameraProvider</name>
+            <instance>legacy/0</instance>
+        </interface>
+        <fqname>@2.4::ICameraProvider/legacy/0</fqname>
+    </hal>
+</manifest>
