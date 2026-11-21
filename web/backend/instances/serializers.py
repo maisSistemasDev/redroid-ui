@@ -13,6 +13,8 @@ class InstanceSerializer(serializers.ModelSerializer):
             "vpn_enabled", "vpn_type", "vpn_provider", "vpn_country",
             "vpn_username",
             "fake_lat", "fake_lng",
+            "client_id", "client_name", "notes",
+            "proxy_type", "proxy_host", "proxy_port", "proxy_user", "proxy_pass", "proxy_rotate_url",
             "created_at",
         ]
         read_only_fields = ["id", "user", "container_id", "created_at"]
@@ -35,6 +37,19 @@ class CreateInstanceSerializer(serializers.Serializer):
     vpn_country = serializers.CharField(required=False, default="", allow_blank=True, max_length=2)
     fake_lat = serializers.FloatField(required=False, default=None, allow_null=True)
     fake_lng = serializers.FloatField(required=False, default=None, allow_null=True)
+
+    # Multi-tenant and Client Tagging
+    client_id = serializers.CharField(required=False, default="", allow_blank=True, max_length=64)
+    client_name = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
+    notes = serializers.CharField(required=False, default="", allow_blank=True)
+
+    # 4G/5G Mobile Proxy Support
+    proxy_type = serializers.CharField(required=False, default="http", allow_blank=True, max_length=16)
+    proxy_host = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
+    proxy_port = serializers.IntegerField(required=False, default=None, allow_null=True)
+    proxy_user = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
+    proxy_pass = serializers.CharField(required=False, default="", allow_blank=True, max_length=128)
+    proxy_rotate_url = serializers.CharField(required=False, default="", allow_blank=True)
 
 
 class UpdateGpsSerializer(serializers.Serializer):

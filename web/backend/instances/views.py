@@ -3,20 +3,25 @@ from __future__ import annotations
 import re
 import uuid
 import logging
+import base64
+import subprocess
+import time
+import shlex
+import urllib.request
 from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser
+from rest_framework.parsers import MultiPartParser, JSONParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import AccessToken
 from celery.result import AsyncResult
 
-from django.http import StreamingHttpResponse
+from django.http import StreamingHttpResponse, HttpResponse
 
 from .models import Instance
 from .serializers import CreateInstanceSerializer, InstanceSerializer, UpdateGpsSerializer, UpdateVpnSerializer
@@ -117,6 +122,15 @@ class InstanceViewSet(viewsets.ModelViewSet):
             "vpn_country": d.get("vpn_country", ""),
             "fake_lat": d.get("fake_lat"),
             "fake_lng": d.get("fake_lng"),
+            "client_id": d.get("client_id", ""),
+            "client_name": d.get("client_name", ""),
+            "notes": d.get("notes", ""),
+            "proxy_type": d.get("proxy_type", "http"),
+            "proxy_host": d.get("proxy_host", ""),
+            "proxy_port": d.get("proxy_port"),
+            "proxy_user": d.get("proxy_user", ""),
+            "proxy_pass": d.get("proxy_pass", ""),
+            "proxy_rotate_url": d.get("proxy_rotate_url", ""),
         }
         try:
             task = create_instance_task.delay(user.id, payload)
@@ -536,6 +550,262 @@ class InstanceViewSet(viewsets.ModelViewSet):
                 "status": "error",
                 "message": str(e),
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # ── AI AGENT AUTOMATION API GATEWAY ──
+    @action(detail=True, methods=["get"], url_path="screenshot")
+    def screenshot(self, request, pk=None):
+        """Ultra-fast screenshot for AI Vision agents."""
+        instance = self.get_object()
+        serial = resolve_serial(instance)
+        cname = instance.name
+        t0 = time.time()
+        try:
+            p = subprocess.run(
+                ["docker", "exec", cname, "screencap", "-p"],
+                capture_output=True,
+                timeout=6,
+                check=False,
+            )
+            data = p.stdout
+            if p.returncode != 0 or len(data) < 100:
+                p2 = subprocess.run(
+                    ["adb", "-s", serial, "exec-out", "screencap", "-p"],
+                    capture_output=True,
+                    timeout=8,
+                    check=False,
+                )
+                data = p2.stdout
+            latency_ms = int((time.time() - t0) * 1000)
+            fmt = request.query_params.get("encoding", "").lower()
+            if fmt == "base64" or request.query_params.get("b64") == "1":
+                b64 = base64.b64encode(data).decode("utf-8")
+                return Response({
+                    "status": "ok",
+                    "format": "png",
+                    "latency_ms": latency_ms,
+                    "bytes": len(data),
+                    "base64": b64,
+                })
+            resp = HttpResponse(data, content_type="image/png")
+            resp["X-Latency-Ms"] = str(latency_ms)
+            return resp
+        except Exception as e:
+            logger.exception("screenshot failed for %s", instance.name)
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=["post"], url_path="tap")
+    def agent_tap(self, request, pk=None):
+        """Tap at (x, y). Supports absolute or normalized (0.0 - 1.0) coordinates."""
+        from .services import cmd_send_root
+        instance = self.get_object()
+        serial = resolve_serial(instance)
+        try:
+            x = request.data.get("x")
+            y = request.data.get("y")
+            normalized = request.data.get("normalized", False)
+            if x is None or y is None:
+                return Response({"detail": "x and y are required"}, status=status.HTTP_400_BAD_REQUEST)
+            if normalized or (0.0 <= float(x) <= 1.0 and 0.0 <= float(y) <= 1.0 and isinstance(x, float)):
+                width = int(request.data.get("width", 720))
+                height = int(request.data.get("height", 1280))
+                actual_x = int(float(x) * width)
+                actual_y = int(float(y) * height)
+            else:
+                actual_x = int(x)
+                actual_y = int(y)
+            ok = cmd_send_root(serial, f"input tap {actual_x} {actual_y}", timeout=5)
+            return Response({"status": "ok" if ok else "failed", "x": actual_x, "y": actual_y})
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=["post"], url_path="swipe")
+    def agent_swipe(self, request, pk=None):
+        """Swipe from (x1, y1) to (x2, y2) with duration in ms."""
+        from .services import cmd_send_root
+        instance = self.get_object()
+        serial = resolve_serial(instance)
+        try:
+            x1 = int(request.data.get("x1", 360))
+            y1 = int(request.data.get("y1", 800))
+            x2 = int(request.data.get("x2", 360))
+            y2 = int(request.data.get("y2", 300))
+            duration = int(request.data.get("duration", 300))
+            ok = cmd_send_root(serial, f"input swipe {x1} {y1} {x2} {y2} {duration}", timeout=5)
+            return Response({"status": "ok" if ok else "failed", "x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration": duration})
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=["post"], url_path="type")
+    def agent_type(self, request, pk=None):
+        """Type text into focused element with clipboard fallback for emojis/accents."""
+        from .services import cmd_send_root, ClipboardService
+        instance = self.get_object()
+        serial = resolve_serial(instance)
+        text = str(request.data.get("text", ""))
+        use_clipboard = request.data.get("clipboard", False)
+        try:
+            if use_clipboard or any(ord(c) > 127 for c in text) or " " in text:
+                try:
+                    ClipboardService.set_text(serial, text)
+                    cmd_send_root(serial, "input keyevent 279", timeout=5)
+                    return Response({"status": "ok", "method": "clipboard_paste", "length": len(text)})
+                except Exception:
+                    pass
+            safe_text = text.replace(" ", "%s").replace("&", "\\&").replace('"', '\\"')
+            ok = cmd_send_root(serial, f"input text \"{safe_text}\"", timeout=5)
+            return Response({"status": "ok" if ok else "failed", "method": "input_text", "length": len(text)})
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=["post"], url_path="keyevent")
+    def agent_keyevent(self, request, pk=None):
+        """Send Android keyevent (HOME=3, BACK=4, ENTER=66, APP_SWITCH=187)."""
+        from .services import cmd_send_root
+        instance = self.get_object()
+        serial = resolve_serial(instance)
+        KEY_MAP = {
+            "HOME": 3, "BACK": 4, "UP": 19, "DOWN": 20, "LEFT": 21, "RIGHT": 22,
+            "ENTER": 66, "DELETE": 67, "APP_SWITCH": 187, "POWER": 26, "VOLUME_UP": 24, "VOLUME_DOWN": 25
+        }
+        val = request.data.get("keycode") or request.data.get("key")
+        code = KEY_MAP.get(str(val).upper(), val)
+        try:
+            ok = cmd_send_root(serial, f"input keyevent {code}", timeout=5)
+            return Response({"status": "ok" if ok else "failed", "keycode": code})
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=["get"], url_path="ui_dump")
+    def ui_dump(self, request, pk=None):
+        """Dump UI Automator hierarchy for VLM accessibility analysis."""
+        instance = self.get_object()
+        cname = instance.name
+        try:
+            subprocess.run(
+                ["docker", "exec", cname, "uiautomator", "dump", "/data/local/tmp/uidump.xml"],
+                capture_output=True, timeout=8, check=False
+            )
+            p = subprocess.run(
+                ["docker", "exec", cname, "cat", "/data/local/tmp/uidump.xml"],
+                capture_output=True, text=True, timeout=5, check=False
+            )
+            return Response({"status": "ok", "xml": p.stdout})
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=["get"], url_path="agent_status")
+    def agent_status(self, request, pk=None):
+        """Current foreground package, resolution, and IP."""
+        instance = self.get_object()
+        cname = instance.name
+        try:
+            focus_proc = subprocess.run(
+                ["docker", "exec", cname, "sh", "-c", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | head -n 2"],
+                capture_output=True, text=True, timeout=5, check=False
+            )
+            size_proc = subprocess.run(
+                ["docker", "exec", cname, "wm", "size"],
+                capture_output=True, text=True, timeout=5, check=False
+            )
+            ip_proc = subprocess.run(
+                ["docker", "exec", cname, "curl", "-s", "-m", "3", "https://api.ipify.org"],
+                capture_output=True, text=True, timeout=4, check=False
+            )
+            return Response({
+                "status": "ok",
+                "instance": instance.name,
+                "focus": (focus_proc.stdout or "").strip(),
+                "display_size": (size_proc.stdout or "").strip(),
+                "public_ip": (ip_proc.stdout or "").strip() or "N/A",
+                "client_id": instance.client_id,
+                "client_name": instance.client_name,
+            })
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # ── REMOTION GALLERY BRIDGE ──
+    @action(detail=True, methods=["post"], url_path="inject_video", parser_classes=[MultiPartParser, JSONParser, FormParser])
+    def inject_video(self, request, pk=None):
+        """Inject a rendered Remotion MP4 directly into Android Gallery and trigger media scanner."""
+        instance = self.get_object()
+        cname = instance.name
+        f = request.FILES.get("video")
+        source_path = request.data.get("path")
+        filename = request.data.get("filename") or (f.name if f else "video_ugc.mp4")
+        if not filename.endswith(".mp4"):
+            filename += ".mp4"
+
+        try:
+            subprocess.run(
+                ["docker", "exec", cname, "mkdir", "-p", "/data/media/0/DCIM/Camera"],
+                check=False, timeout=5
+            )
+            dest_fs = f"/data/media/0/DCIM/Camera/{filename}"
+            dest_uri = f"file:///sdcard/DCIM/Camera/{filename}"
+
+            if f:
+                tmp_path = f"/tmp/{uuid.uuid4().hex}_{filename}"
+                with open(tmp_path, "wb") as dest:
+                    for chunk in f.chunks():
+                        dest.write(chunk)
+                subprocess.run(["docker", "cp", tmp_path, f"{cname}:{dest_fs}"], check=True, timeout=30)
+                try:
+                    Path(tmp_path).unlink()
+                except Exception:
+                    pass
+            elif source_path:
+                subprocess.run(["docker", "cp", source_path, f"{cname}:{dest_fs}"], check=True, timeout=30)
+            else:
+                return Response({"detail": "Envie o arquivo 'video' ou forneça 'path' no servidor."}, status=status.HTTP_400_BAD_REQUEST)
+
+            subprocess.run(["docker", "exec", cname, "chown", "media_rw:media_rw", dest_fs], check=False, timeout=5)
+            subprocess.run(["docker", "exec", cname, "chmod", "664", dest_fs], check=False, timeout=5)
+
+            scan_proc = subprocess.run([
+                "docker", "exec", cname, "am", "broadcast",
+                "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                "-d", dest_uri
+            ], capture_output=True, text=True, timeout=8, check=False)
+
+            return Response({
+                "status": "ok",
+                "message": f"Vídeo {filename} injetado com sucesso na Galeria do Android!",
+                "gallery_path": f"/sdcard/DCIM/Camera/{filename}",
+                "broadcast_output": (scan_proc.stdout or "").strip()
+            })
+        except Exception as e:
+            logger.exception("inject_video failed for %s", instance.name)
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # ── 4G/5G MOBILE PROXY ROTATION ──
+    @action(detail=True, methods=["post"], url_path="rotate_proxy")
+    def rotate_proxy(self, request, pk=None):
+        """Call rotating 4G/5G mobile proxy webhook and verify new IP."""
+        instance = self.get_object()
+        cname = instance.name
+        rotate_url = request.data.get("rotate_url") or instance.proxy_rotate_url
+        if not rotate_url:
+            return Response({"detail": "Nenhuma URL de rotação de IP configurada nesta instância."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            req = urllib.request.Request(rotate_url, headers={"User-Agent": "Virtuale-Proxy-Rotator/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                rotate_result = resp.read().decode("utf-8", errors="replace")
+            time.sleep(3)
+            ip_proc = subprocess.run(
+                ["docker", "exec", cname, "curl", "-s", "-m", "5", "https://api.ipify.org"],
+                capture_output=True, text=True, timeout=6, check=False
+            )
+            new_ip = (ip_proc.stdout or "").strip()
+            return Response({
+                "status": "ok",
+                "rotated": True,
+                "webhook_response": rotate_result[:200],
+                "new_ip": new_ip or "Rotação enviada"
+            })
+        except Exception as e:
+            logger.exception("rotate_proxy failed for %s", instance.name)
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class JobStatusView(APIView):

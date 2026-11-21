@@ -29,6 +29,20 @@ class Instance(models.Model):
     vpn_country = models.CharField(max_length=2, blank=True, default="")
     fake_lat = models.FloatField(null=True, blank=True, default=None)
     fake_lng = models.FloatField(null=True, blank=True, default=None)
+
+    # Multi-tenant and Client Tagging
+    client_id = models.CharField(max_length=64, blank=True, default="")
+    client_name = models.CharField(max_length=128, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+
+    # 4G/5G Mobile Proxy Support
+    proxy_type = models.CharField(max_length=16, blank=True, default="http")
+    proxy_host = models.CharField(max_length=128, blank=True, default="")
+    proxy_port = models.IntegerField(null=True, blank=True)
+    proxy_user = models.CharField(max_length=128, blank=True, default="")
+    proxy_pass = models.CharField(max_length=128, blank=True, default="")
+    proxy_rotate_url = models.URLField(blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

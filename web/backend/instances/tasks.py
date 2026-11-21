@@ -84,6 +84,15 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
         magisk_enabled = bool(payload.get("magisk_enabled", False))
         fake_lat = payload.get("fake_lat")
         fake_lng = payload.get("fake_lng")
+        client_id = payload.get("client_id", "")
+        client_name = payload.get("client_name", "")
+        notes = payload.get("notes", "")
+        proxy_type = payload.get("proxy_type", "http")
+        proxy_host = payload.get("proxy_host", "")
+        proxy_port = payload.get("proxy_port")
+        proxy_user = payload.get("proxy_user", "")
+        proxy_pass = payload.get("proxy_pass", "")
+        proxy_rotate_url = payload.get("proxy_rotate_url", "")
 
         # --- VPN sidecar setup (before creating the Android container) ---
         if vpn_enabled:
@@ -148,6 +157,15 @@ def create_instance_task(self, user_id: int, payload: dict) -> dict:
             vpn_country=vpn_country,
             fake_lat=fake_lat,
             fake_lng=fake_lng,
+            client_id=client_id,
+            client_name=client_name,
+            notes=notes,
+            proxy_type=proxy_type,
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            proxy_user=proxy_user,
+            proxy_pass=proxy_pass,
+            proxy_rotate_url=proxy_rotate_url,
         )
         TouchService.setup_virtual_touch(name)
         TouchService.setup_virtual_keyboard(name)

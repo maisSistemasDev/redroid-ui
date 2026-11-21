@@ -15,9 +15,13 @@ const store = useInstancesStore()
 const router = useRouter()
 const actionLoading = ref('')
 const apkInput = ref(null)
+const videoInput = ref(null)
 const videoEl = ref(null)
 const showVpnModal = ref(false)
 const showToolsModal = ref(false)
+const showScreenshotModal = ref(false)
+const screenshotData = ref('')
+const rotateStatus = ref('')
 
 const connectionLabel = computed(() => {
   const s = (props.instance.connection_status || 'unknown').toLowerCase()
@@ -167,67 +171,156 @@ async function handleApk(event) {
     if (apkInput.value) apkInput.value.value = ''
   }
 }
+
+async function handleInjectVideo(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  actionLoading.value = 'video'
+  try {
+    const formData = new FormData()
+    formData.append('video', file)
+    const { data } = await api.post(`/instances/${props.instance.id}/inject_video/`, formData)
+    alert(data.message || 'Vídeo Remotion injetado com sucesso na Galeria!')
+  } catch (err) {
+    alert(err.response?.data?.detail || err.message || 'Erro ao injetar vídeo')
+  } finally {
+    actionLoading.value = ''
+    if (videoInput.value) videoInput.value.value = ''
+  }
+}
+
+async function captureScreenshot() {
+  actionLoading.value = 'screenshot'
+  try {
+    const { data } = await api.get(`/instances/${props.instance.id}/screenshot/?encoding=base64`)
+    screenshotData.value = `data:image/png;base64,${data.base64}`
+    showScreenshotModal.value = true
+  } catch (err) {
+    alert('Erro ao capturar screenshot do dispositivo')
+  } finally {
+    actionLoading.value = ''
+  }
+}
+
+async function rotateProxy() {
+  actionLoading.value = 'rotate'
+  try {
+    const { data } = await api.post(`/instances/${props.instance.id}/rotate_proxy/`)
+    rotateStatus.value = `Novo IP: ${data.new_ip}`
+    setTimeout(() => { rotateStatus.value = '' }, 5000)
+  } catch (err) {
+    alert(err.response?.data?.detail || 'Erro ao rotacionar proxy móvel')
+  } finally {
+    actionLoading.value = ''
+  }
+}
 </script>
 
 <template>
   <div class="phone-card">
-    <div class="phone-screen" @dblclick="openFullscreen">
-      <video
-        v-show="instance.running"
-        ref="videoEl"
-        class="phone-video"
-        muted
-        autoplay
-        playsinline
-      />
-      <div v-if="!instance.running" class="phone-off">
-        <span class="off-icon">&#9211;</span>
-        <span class="off-label">Desligado</span>
+    <!-- Realistic Smartphone Chassis Mockup -->
+    <div class="phone-chassis" @dblclick="openFullscreen">
+      <div class="phone-notch" />
+      <div class="phone-chassis__screen">
+        <video
+          v-show="instance.running"
+          ref="videoEl"
+          class="phone-video"
+          muted
+          autoplay
+          playsinline
+        />
+        <div v-if="!instance.running" class="phone-off">
+          <span class="off-icon">&#9211;</span>
+          <span class="off-label">Dispositivo Desligado</span>
+        </div>
       </div>
     </div>
 
-    <div class="phone-bar">
-      <span class="phone-name" :title="instance.name">{{ instance.name }}</span>
-      <span :class="['badge', instance.running ? 'badge--running' : 'badge--stopped']">
-        {{ instance.status }}
-      </span>
-      <span :class="['badge', connectionBadgeClass]" :title="`Conexão ADB: ${instance.connection_status || 'unknown'}`">
-        {{ connectionLabel }}
-      </span>
-      <span v-if="instance.vpn_enabled" :class="['badge', vpnConnBadgeClass]" :title="`Status do túnel: ${instance.vpn_connection_status || 'unknown'}`">
-        {{ vpnConnLabel }}
-      </span>
-      <span v-if="instance.device_profile" class="badge badge--profile" :title="`Perfil: ${instance.device_profile}`">
-        {{ instance.device_profile }}
-      </span>
-      <span v-if="instance.magisk_enabled" class="badge badge--magisk" title="Magisk root ativo">
-        Magisk
-      </span>
+    <!-- Device Tags and Status Indicators -->
+    <div class="phone-info">
+      <div class="phone-header-row">
+        <span class="phone-name" :title="instance.name">{{ instance.name }}</span>
+        <span :class="['badge', instance.running ? 'badge--running' : 'badge--stopped']">
+          {{ instance.status }}
+        </span>
+      </div>
+
+      <div class="phone-badges-row">
+        <span v-if="instance.client_name || instance.client_id" class="badge badge--client" :title="`Cliente: ${instance.client_name || instance.client_id}`">
+          🏢 {{ instance.client_name || instance.client_id }}
+        </span>
+        <span :class="['badge', connectionBadgeClass]" :title="`Conexão ADB: ${instance.connection_status || 'unknown'}`">
+          {{ connectionLabel }}
+        </span>
+        <span v-if="instance.vpn_enabled" :class="['badge', vpnConnBadgeClass]" :title="`Status do túnel: ${instance.vpn_connection_status || 'unknown'}`">
+          {{ vpnConnLabel }}
+        </span>
+        <span v-if="instance.device_profile" class="badge badge--profile" :title="`Perfil: ${instance.device_profile}`">
+          {{ instance.device_profile }}
+        </span>
+        <span v-if="instance.proxy_rotate_url" class="badge badge--running" title="Proxy Móvel 4G/5G com Rotação">
+          4G Rotativo
+        </span>
+      </div>
+      <div v-if="rotateStatus" class="rotate-alert">{{ rotateStatus }}</div>
     </div>
 
+    <!-- Quick Action Toolbar -->
     <div class="phone-actions">
-      <button v-if="!instance.running" class="btn btn--small" :disabled="!!actionLoading" @click="doAction('start')">
-        <span v-if="actionLoading === 'start'" class="spinner" /> Iniciar
+      <button v-if="!instance.running" class="btn btn--small btn--primary" :disabled="!!actionLoading" @click="doAction('start')">
+        <span v-if="actionLoading === 'start'" class="spinner" /> ▶ Ligar
       </button>
       <button v-if="instance.running" class="btn btn--small" :disabled="!!actionLoading" @click="doAction('stop')">
-        <span v-if="actionLoading === 'stop'" class="spinner" /> Parar
+        <span v-if="actionLoading === 'stop'" class="spinner" /> ⏹ Parar
       </button>
-      <button v-if="instance.running" class="btn btn--small btn--primary" @click="openFullscreen">
-        Abrir
+      <button v-if="instance.running" class="btn btn--small btn--accent-outline" @click="openFullscreen" title="Abrir Console AI Split-Screen">
+        ⚡ Viewer + AI
       </button>
-      <label class="btn btn--small apk-label" :class="{ disabled: !!actionLoading || !instance.running }">
+
+      <!-- Instant Screenshot -->
+      <button v-if="instance.running" class="btn btn--small" :disabled="!!actionLoading" @click="captureScreenshot" title="Capturar tela instantânea">
+        <span v-if="actionLoading === 'screenshot'" class="spinner" /> 📸
+      </button>
+
+      <!-- Remotion Video Injector -->
+      <label v-if="instance.running" class="btn btn--small apk-label" :class="{ disabled: !!actionLoading }" title="Injetar vídeo Remotion na Galeria">
+        <span v-if="actionLoading === 'video'" class="spinner" /> 🎬 Galeria
+        <input ref="videoInput" type="file" accept="video/mp4" hidden :disabled="!!actionLoading" @change="handleInjectVideo" />
+      </label>
+
+      <!-- 4G IP Rotator -->
+      <button v-if="instance.proxy_rotate_url" class="btn btn--small" :disabled="!!actionLoading" @click="rotateProxy" title="Rotacionar IP Móvel 4G/5G">
+        <span v-if="actionLoading === 'rotate'" class="spinner" /> 🔄 IP
+      </button>
+
+      <!-- Install APK -->
+      <label class="btn btn--small apk-label" :class="{ disabled: !!actionLoading || !instance.running }" title="Instalar arquivo APK">
         <span v-if="actionLoading === 'apk'" class="spinner" /> APK
         <input ref="apkInput" type="file" accept=".apk" hidden :disabled="!!actionLoading || !instance.running" @change="handleApk" />
       </label>
+
       <button class="btn btn--small" :disabled="!!actionLoading" @click="showVpnModal = true" title="Configurar VPN / Tor">
-        &#128274; VPN
+        🔒 VPN
       </button>
-      <button class="btn btn--small" :disabled="!!actionLoading" @click="showToolsModal = true" title="GPS, Clipboard, Arquivos, Backup, Terminal">
-        &#9881; Tools
+      <button class="btn btn--small" :disabled="!!actionLoading" @click="showToolsModal = true" title="Configurações Avançadas e Shell">
+        ⚙️
       </button>
-      <button class="btn btn--small btn--danger" :disabled="!!actionLoading" @click="doAction('delete')">
-        <span v-if="actionLoading === 'delete'" class="spinner" /> &#10005;
+      <button class="btn btn--small btn--danger" :disabled="!!actionLoading" @click="doAction('delete')" title="Excluir Instância">
+        <span v-if="actionLoading === 'delete'" class="spinner" /> 🗑️
       </button>
+    </div>
+
+    <!-- Screenshot Modal Preview -->
+    <div v-if="showScreenshotModal" class="overlay" @click.self="showScreenshotModal = false">
+      <div class="modal" style="max-width: 380px; text-align: center;">
+        <h2>📸 Captura de Tela (VLM Ready)</h2>
+        <img :src="screenshotData" style="width: 100%; border-radius: 12px; margin-bottom: 14px; border: 1px solid var(--border);" />
+        <div class="form-actions" style="justify-content: center;">
+          <a :href="screenshotData" download="screenshot.png" class="btn btn--primary">Baixar PNG</a>
+          <button class="btn" @click="showScreenshotModal = false">Fechar</button>
+        </div>
+      </div>
     </div>
 
     <VpnSettingsModal v-if="showVpnModal" :instance="instance" @close="showVpnModal = false" />
@@ -240,30 +333,18 @@ async function handleApk(event) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  transition: transform var(--transition);
+  gap: 12px;
+  background: rgba(18, 18, 21, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 16px;
+  transition: all var(--transition);
+  backdrop-filter: blur(10px);
 }
 
 .phone-card:hover {
-  transform: translateY(-2px);
-}
-
-.phone-screen {
-  width: 220px;
-  height: 390px;
-  border-radius: 20px;
-  overflow: hidden;
-  background: #000;
-  border: 2px solid var(--border-hover);
-  cursor: pointer;
-  position: relative;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.2);
-  transition: border-color var(--transition), box-shadow var(--transition);
-}
-
-.phone-screen:hover {
-  border-color: var(--accent);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 0 0 3px var(--accent-glow);
+  border-color: rgba(16, 185, 129, 0.4);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
 }
 
 .phone-video {
@@ -292,79 +373,66 @@ async function handleApk(event) {
 .off-label {
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 1.5px;
-  opacity: 0.4;
+  letter-spacing: 1px;
+  opacity: 0.5;
 }
 
-.phone-bar {
+.phone-info {
+  width: 100%;
+  max-width: 236px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.phone-header-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  max-width: 220px;
-  flex-wrap: wrap;
-  justify-content: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .phone-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--fg);
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.phone-badges-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.rotate-alert {
+  font-size: 11px;
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.12);
+  padding: 3px 6px;
+  border-radius: 4px;
+  text-align: center;
+}
+
 .phone-actions {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
+  max-width: 236px;
+  flex-wrap: wrap;
   justify-content: center;
 }
 
-.apk-label { cursor: pointer; }
-.apk-label.disabled { opacity: 0.5; pointer-events: none; }
-
-.badge--vpn-on {
-  background: rgba(93, 186, 97, 0.14);
-  color: var(--success);
+.apk-label {
+  cursor: pointer;
 }
 
-.badge--vpn-off {
-  background: rgba(139, 141, 144, 0.14);
-  color: var(--fg-muted);
-}
-
-.badge--vpn-warn {
-  background: rgba(232, 167, 62, 0.14);
-  color: var(--warning);
-}
-
-.badge--conn-up {
-  background: rgba(93, 186, 97, 0.14);
-  color: var(--success);
-}
-
-.badge--conn-warn {
-  background: rgba(232, 167, 62, 0.14);
-  color: var(--warning);
-}
-
-.badge--conn-down {
-  background: rgba(224, 82, 82, 0.14);
-  color: var(--danger);
-}
-
-.badge--profile {
-  background: rgba(130, 130, 220, 0.14);
-  color: var(--accent);
-  font-size: 10px;
-  text-transform: uppercase;
-}
-
-.badge--magisk {
-  background: rgba(50, 180, 130, 0.14);
-  color: #32b482;
-  font-size: 10px;
-  text-transform: uppercase;
+.apk-label.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 </style>

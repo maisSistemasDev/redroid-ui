@@ -7,6 +7,9 @@ const emit = defineEmits(['close'])
 const store = useInstancesStore()
 
 const name = ref('')
+const clientName = ref('')
+const clientId = ref('')
+const proxyRotateUrl = ref('')
 const androidVersion = ref('redroid/redroid:14.0.0-latest')
 const useCustomImage = ref(false)
 const customImage = ref('')
@@ -90,6 +93,9 @@ async function handleSubmit() {
     }
     const payload = {
       name: name.value,
+      client_name: clientName.value,
+      client_id: clientId.value || clientName.value,
+      proxy_rotate_url: proxyRotateUrl.value,
       image,
       gpu_mode: 'guest',
       device_profile: deviceProfile.value,
@@ -171,6 +177,16 @@ onMounted(() => {
         <div class="form-group">
           <label class="label" for="inst-name">Nome</label>
           <input id="inst-name" v-model="name" class="input" placeholder="meu-android" required />
+        </div>
+
+        <div class="form-group">
+          <label class="label" for="inst-client">Cliente / Projeto (Tag)</label>
+          <input id="inst-client" v-model="clientName" class="input" placeholder="Ex: MKOS UGC - Felipe" />
+        </div>
+
+        <div class="form-group">
+          <label class="label" for="inst-proxy-rot">URL Webhook Rotação IP 4G/5G (opcional)</label>
+          <input id="inst-proxy-rot" v-model="proxyRotateUrl" class="input" placeholder="https://proxy-provider.com/rotate?key=..." />
         </div>
 
         <div class="form-group">
